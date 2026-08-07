@@ -43,20 +43,12 @@ start_warp() {
     systemctl enable --now warp-svc >/dev/null 2>&1 || true
     systemctl start warp-svc >/dev/null 2>&1 || true
 
-    local bound=""
-    for _ in $(seq 1 20); do
-        if ss -tln 2>/dev/null | grep -q ":$SOCKS_PORT"; then
-            bound="yes"
-            break
-        fi
-        sleep 1
-    done
-    [ -n "$bound" ] || die "warp-svc did not bind :${SOCKS_PORT} in 20s"
-
-    # registration present? repair a dropped one (rotation delete/new can leave none)
+    # registration repair FIRST — with no registration, warp-svc never binds
+    # the proxy port, so a port-wait before this would die forever (real
+    # 2026-08-07 live-test finding: stub masked it).
     if command -v warp-cli >/dev/null 2>&1; then
         if warp-cli --accept-tos registration show >/dev/null 2>&1; then
-            log "warp-svc on :${SOCKS_PORT} with registration present"
+            log "warp registration present"
         else
             log "registration missing — registering + connecting"
             warp-cli --accept-tos registration delete >/dev/null 2>&1 || true
@@ -67,6 +59,17 @@ start_warp() {
     else
         log "warp-cli not found — skipping registration check"
     fi
+
+    # now wait for the port (it binds once a registration exists)
+    local bound=""
+    for _ in $(seq 1 20); do
+        if ss -tln 2>/dev/null | grep -q ":$SOCKS_PORT"; then
+            bound="yes"
+            break
+        fi
+        sleep 1
+    done
+    [ -n "$bound" ] || die "warp-svc did not bind :${SOCKS_PORT} in 20s"
 }
 
 # ---------------------------------------------------------------------------
