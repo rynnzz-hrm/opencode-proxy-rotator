@@ -135,6 +135,6 @@ sleep 2
 print_models
 
 log "done. chain: opencode -> oc-free-proxy:${PROXY_PORT} -> WARP:${SOCKS_PORT}"
-echo -n "egress: "
-curl -s --max-time 8 https://api.ipify.org; echo
+echo -n "egress via WARP proxy: "
+curl -s --max-time 8 -x socks5h://127.0.0.1:${SOCKS_PORT} https://api.ipify.org; echo
 echo "   (expect a 104.28.x Cloudflare IP)"
