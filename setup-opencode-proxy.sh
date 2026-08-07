@@ -105,7 +105,7 @@ const BIND_HOST = "127.0.0.1";
 const TARGET = "https://opencode.ai/zen";
 const UPSTREAM_AUTH = process.env.OC_UPSTREAM_AUTH || "";
 process.on("unhandledRejection", (e) => console.error(`[${new Date().toISOString()}] unhandledRejection: ${e.message}`));
-const FREE_MODELS = ["deepseek-v4-flash-free","ling-3.0-flash-free","mimo-v2.5-free","nemotron-3-ultra-free","north-mini-code-free","laguna-s-2.1-free"];
+const FREE_MODELS = ["deepseek-v4-flash-free","ling-3.0-flash-free","mimo-v2.5-free","nemotron-3-ultra-free","laguna-s-2.1-free"];
 const PAID_MODELS = ["glm-5.2","deepseek-v4-pro","kimi-k3","qwen3.6-plus","minimax-m3","gpt-5.6-sol","mimo-v2-free","hy3-free"];
 function allowedModels(){ return UPSTREAM_AUTH ? [...FREE_MODELS,...PAID_MODELS] : FREE_MODELS; }
 app.get("/health", (req,res)=>res.json({status:"ok"}));
