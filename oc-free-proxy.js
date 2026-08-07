@@ -27,8 +27,9 @@ const FREE_MODELS = [
     "ling-3.0-flash-free",
     "mimo-v2.5-free",
     "nemotron-3-ultra-free",
-    "north-mini-code-free",
     "laguna-s-2.1-free",
+    // north-mini-code-free removed 2026-08-07: listed upstream but 401s on
+    // anonymous tier even direct — advertising it breaks clients (auto-sync).
 ];
 const PAID_MODELS = ["glm-5.2", "deepseek-v4-pro", "kimi-k3", "qwen3.6-plus", "minimax-m3", "gpt-5.6-sol", "mimo-v2-free", "hy3-free"]; // need OC_UPSTREAM_AUTH
 
