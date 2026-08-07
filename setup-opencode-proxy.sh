@@ -183,6 +183,75 @@ TMR
 }
 
 # ---------------------------------------------------------------------------
+# 4b. daily heal-guard: verify registration + egress; re-heal if broken.
+#     20-min rotation can kill the registration mid-swap (delete ok, new fail);
+#     this standing guard catches any drop within a day and repairs it.
+# ---------------------------------------------------------------------------
+deploy_heal_guard() {
+    local guard="/usr/local/bin/warp-heal"
+    if [ ! -f "$guard" ]; then
+        cat > "$guard" <<'HEAL'
+#!/usr/bin/env bash
+# warp-heal — daily guard: ensure WARP registration + egress are alive.
+set -euo pipefail
+log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"; }
+
+if ! warp-cli --accept-tos registration show >/dev/null 2>&1; then
+    log "registration missing — re-registering"
+    warp-cli --accept-tos registration delete >/dev/null 2>&1 || true
+    warp-cli --accept-tos registration new >/dev/null 2>&1 || true
+    warp-cli --accept-tos mode proxy >/dev/null 2>&1 || true
+    warp-cli --accept-tos connect >/dev/null 2>&1 || true
+    sleep 5
+fi
+
+# egress sanity: expect a Cloudflare IP through the proxy
+eg=$(curl -s --max-time 8 -x socks5h://127.0.0.1:40000 https://api.ipify.org 2>/dev/null || echo "")
+case "$eg" in
+  104.28.*|162.159.*|172.64.*) log "heal-ok: egress $eg" ;;
+  *) log "WARN: egress '$eg' not Cloudflare — running setup"
+     /usr/local/bin/setup-opencode-proxy.sh || true ;;
+esac
+HEAL
+        chmod +x "$guard"
+        log "wrote heal-guard $guard"
+    fi
+
+    local hs="/etc/systemd/system/warp-heal.service"
+    [ -f "$hs" ] || cat > "$hs" <<'HS'
+[Unit]
+Description=WARP heal-guard (daily)
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/warp-heal
+HS
+
+    local ht="/etc/systemd/system/warp-heal.timer"
+    [ -f "$ht" ] || cat > "$ht" <<'HT'
+[Unit]
+Description=Run WARP heal-guard daily
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=24h
+RandomizedDelaySec=30min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+HT
+
+    systemctl daemon-reload
+    systemctl enable --now warp-heal.timer >/dev/null 2>&1 || true
+    if systemctl is-active --quiet warp-heal.timer; then
+        log "warp-heal.timer active (daily guard)"
+    else
+        log "warp-heal.timer not running"
+    fi
+}
+
+# ---------------------------------------------------------------------------
 # 5. opencode env (content-checked)
 # ---------------------------------------------------------------------------
 write_opencode_env() {
@@ -215,6 +284,7 @@ main() {
     ensure_oc_proxy_js
     deploy_oc_unit
     deploy_rotation
+    deploy_heal_guard
     write_opencode_env
     sleep 2
 
