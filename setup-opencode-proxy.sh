@@ -108,6 +108,7 @@ process.on("unhandledRejection", (e) => console.error(`[${new Date().toISOString
 const FREE_MODELS = ["deepseek-v4-flash-free","ling-3.0-flash-free","mimo-v2.5-free","nemotron-3-ultra-free","laguna-s-2.1-free"];
 const PAID_MODELS = ["glm-5.2","deepseek-v4-pro","kimi-k3","qwen3.6-plus","minimax-m3","gpt-5.6-sol","mimo-v2-free","hy3-free"];
 function allowedModels(){ return UPSTREAM_AUTH ? [...FREE_MODELS,...PAID_MODELS] : FREE_MODELS; }
+app.use(express.json());
 app.get("/health", (req,res)=>res.json({status:"ok"}));
 app.get("/v1/models", (req,res)=>{
   const opt={ hostname:"opencode.ai", path:"/zen/v1/models", method:"GET", headers:{} };
@@ -115,9 +116,19 @@ app.get("/v1/models", (req,res)=>{
   const up=https.request(opt,(ur)=>{ let d=""; ur.on("data",c=>d+=c); ur.on("end",()=>{ try{ const m=JSON.parse(d); res.json({data:(m.data||[]).filter(x=>allowedModels().includes(x.id))}); }catch(e){ res.json({data:[]}); } }); });
   up.on("error",()=>res.json({data:[]})); up.end();
 });
+// Model gate: reject chat requests for models not in the allowlist BEFORE upstream
+app.post("/v1/chat/completions", (req,res,next)=>{
+  const model=req.body && req.body.model;
+  if (model && !allowedModels().includes(model)) {
+    return res.status(400).json({error:{type:"invalid_request_error",message:`model '${model}' is not allowed. Available: ${allowedModels().join(", ")}`}});
+  }
+  next();
+});
 app.use("/", createProxyMiddleware({ target:TARGET, changeOrigin:true, on:{
   error:(e,req,res)=>{ console.error(`[${new Date().toISOString()}] Proxy error: ${e.message}`); res.status(502).json({error:"proxy_error",message:e.message}); },
-  proxyReq:(pr)=>{ pr.removeHeader("Authorization"); pr.removeHeader("authorization"); if (UPSTREAM_AUTH) pr.setHeader("Authorization",UPSTREAM_AUTH); }
+  proxyReq:(pr,req)=>{ pr.removeHeader("Authorization"); pr.removeHeader("authorization"); if (UPSTREAM_AUTH) pr.setHeader("Authorization",UPSTREAM_AUTH);
+    if (req.body && Object.keys(req.body).length>0){ const b=JSON.stringify(req.body); pr.setHeader("Content-Length",Buffer.byteLength(b)); pr.write(b); pr.end(); }
+  }
 }}));
 app.listen(PORT, BIND_HOST, ()=>console.log(`[${new Date().toISOString()}] oc-free-proxy listening on ${BIND_HOST}:${PORT}`));
 PROXYEOF
