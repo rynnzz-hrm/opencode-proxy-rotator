@@ -41,7 +41,7 @@ kill_squatter() {
 start_warp() {
     systemctl enable --now warp-svc >/dev/null 2>&1 || true
     systemctl start warp-svc >/dev/null 2>&1 || true
-    for i in $(seq 1 20); do
+    for _ in $(seq 1 20); do
         if ss -tln 2>/dev/null | grep -q ":$SOCKS_PORT"; then
             log "warp-svc listening on :${SOCKS_PORT}"
             return 0
