@@ -17,6 +17,9 @@ const TARGET = "https://opencode.ai/zen";
 // Free models work WITHOUT auth (anonymous tier). Never send a fake key upstream.
 const UPSTREAM_AUTH = process.env.OC_UPSTREAM_AUTH || "";
 
+// parse JSON bodies (needed for the model gate below)
+app.use(express.json());
+
 process.on("unhandledRejection", (e) => {
     console.error(`[${new Date().toISOString()}] unhandledRejection: ${e.message}`);
 });
@@ -66,6 +69,22 @@ app.get("/v1/models", (req, res) => {
     upstreamReq.end();
 });
 
+// Model gate (TASK 1 2026-08-07): reject chat requests for models not in the
+// allowlist BEFORE they hit upstream. Anonymous tier = FREE_MODELS only; with
+// OC_UPSTREAM_AUTH, paid models are allowed too (matches /v1/models listing).
+app.post("/v1/chat/completions", (req, res, next) => {
+    const model = req.body && req.body.model;
+    if (model && !allowedModels().includes(model)) {
+        return res.status(400).json({
+            error: {
+                type: "invalid_request_error",
+                message: `model '${model}' is not allowed. Available: ${allowedModels().join(", ")}`
+            }
+        });
+    }
+    next();
+});
+
 // Proxy middleware (catch-all LAST)
 app.use("/", createProxyMiddleware({
     target: TARGET,
@@ -75,7 +94,7 @@ app.use("/", createProxyMiddleware({
             console.error(`[${new Date().toISOString()}] Proxy error:`, err.message);
             res.status(502).json({ error: "proxy_error", message: err.message });
         },
-        proxyReq: (proxyReq) => {
+        proxyReq: (proxyReq, req) => {
             // Strip the client's Authorization header — it would be forwarded upstream
             // and cause 401 Invalid API key (the free tier is anonymous).
             proxyReq.removeHeader("Authorization");
@@ -84,6 +103,14 @@ app.use("/", createProxyMiddleware({
             // Inject upstream auth ONLY if a real key is configured
             if (UPSTREAM_AUTH) {
                 proxyReq.setHeader("Authorization", UPSTREAM_AUTH);
+            }
+
+            // express.json() already consumed the request body; forward it upstream
+            if (req.body && Object.keys(req.body).length > 0) {
+                const body = JSON.stringify(req.body);
+                proxyReq.setHeader("Content-Length", Buffer.byteLength(body));
+                proxyReq.write(body);
+                proxyReq.end();
             }
         }
     }
