@@ -1,29 +1,45 @@
 #!/usr/bin/env bash
-# opencode-proxy-rotator — configure the proxy chain for OpenCode on this box.
+# opencode-proxy-rotator — configure the proxy chain for OpenCode, sudo-free.
 #
 # Scope: proxy + opencode ONLY. Does not touch 9router, pi, anything else.
-# Idempotent + self-healing: never deletes a working setup; repairs partial
-# ones (wrong-but-active proxy, dropped registration, missing rotation timer).
+# Works as a normal user (no root): uses ~/.config/systemd/user + ~/.local/bin
+# + ~/.profile. If running as root, uses system paths instead.
 #
 # Chain:
 #   opencode / anything using the proxy
 #     -> oc-free-proxy  :6446   (OpenAI-compatible, forwards to opencode.ai)
-#     -> warp-svc       :40000  (Cloudflare WARP SOCKS5)
-#     -> internet (Cloudflare egress IP)
+#     -> [WARP]         :40000  (optional Cloudflare WARP SOCKS5, if installed)
+#     -> internet
+#
+# The proxy itself is self-installing (writes oc-free-proxy.js + npm deps).
+# WARP rotation is optional: enabled only if warp-cli is available. If not, the
+# proxy still works (direct egress); rotation is skipped with a note.
+# Idempotent + self-healing.
 
 set -euo pipefail
 
 SOCKS_PORT="40000"
 PROXY_PORT="6446"
-RUN_USER="rynn"   # hardcoded: this box's proxy runs as rynn. No env override (unit-injection risk).
+
+# --- path selection: system (root) vs user (non-root) -------------------
+is_root() { [ "$(id -u)" -eq 0 ]; }
+
+if is_root; then
+    SYSTEMD_DIR="/etc/systemd/system"
+    BIN_DIR="/usr/local/bin"
+    systemctl_cmd() { systemctl "$@"; }
+else
+    SYSTEMD_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+    BIN_DIR="${HOME}/.local/bin"
+    mkdir -p "$SYSTEMD_DIR" "$BIN_DIR"
+    systemctl_cmd() { systemctl --user "$@"; }
+fi
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"; }
 die()  { log "FATAL: $*"; exit 1; }
 
-[ "$(id -u)" -eq 0 ] || die "run as root (sudo)"
-
 # ---------------------------------------------------------------------------
-# 1. clear orphan node socks5 squatters on :40000
+# 1. kill orphan node socks5 squatters on :40000 (only if they're node)
 # ---------------------------------------------------------------------------
 kill_squatters() {
     local pid
@@ -37,30 +53,24 @@ kill_squatters() {
 }
 
 # ---------------------------------------------------------------------------
-# 2. warp-svc: bind the port AND ensure a real registration exists
+# 2. WARP (optional): only if warp-cli exists. Repair reg first, then port.
 # ---------------------------------------------------------------------------
 start_warp() {
-    systemctl enable --now warp-svc >/dev/null 2>&1 || true
-    systemctl start warp-svc >/dev/null 2>&1 || true
-
-    # registration repair FIRST — with no registration, warp-svc never binds
-    # the proxy port, so a port-wait before this would die forever (real
-    # 2026-08-07 live-test finding: stub masked it).
-    if command -v warp-cli >/dev/null 2>&1; then
-        if warp-cli --accept-tos registration show >/dev/null 2>&1; then
-            log "warp registration present"
-        else
-            log "registration missing — registering + connecting"
-            warp-cli --accept-tos registration delete >/dev/null 2>&1 || true
-            warp-cli --accept-tos registration new >/dev/null 2>&1 || true
-            warp-cli --accept-tos mode proxy >/dev/null 2>&1 || true
-            warp-cli --accept-tos connect >/dev/null 2>&1 || true
-        fi
-    else
-        log "warp-cli not found — skipping registration check"
+    if ! command -v warp-cli >/dev/null 2>&1; then
+        log "warp-cli not installed — skipping WARP rotation (proxy uses direct egress)"
+        return 0
     fi
 
-    # now wait for the port (it binds once a registration exists)
+    warp-cli --accept-tos registration show >/dev/null 2>&1 && {
+        log "warp registration present"
+    } || {
+        log "registration missing — registering + connecting"
+        warp-cli --accept-tos registration delete >/dev/null 2>&1 || true
+        warp-cli --accept-tos registration new >/dev/null 2>&1 || true
+        warp-cli --accept-tos mode proxy >/dev/null 2>&1 || true
+        warp-cli --accept-tos connect >/dev/null 2>&1 || true
+    }
+
     local bound=""
     for _ in $(seq 1 20); do
         if ss -tln 2>/dev/null | grep -q ":$SOCKS_PORT"; then
@@ -69,67 +79,119 @@ start_warp() {
         fi
         sleep 1
     done
-    [ -n "$bound" ] || die "warp-svc did not bind :${SOCKS_PORT} in 20s"
+    [ -n "$bound" ] || log "WARP did not bind :${SOCKS_PORT} (tunnel may need root/relogin) — proxying direct"
 }
 
 # ---------------------------------------------------------------------------
-# 3. oc-free-proxy unit: content-checked; repairs wrong-but-active
+# 3. oc-free-proxy.js: install from this repo if missing
 # ---------------------------------------------------------------------------
 ensure_oc_proxy_js() {
-    [ -f /usr/local/bin/oc-free-proxy.js ] \
-        || die "missing /usr/local/bin/oc-free-proxy.js"
-}
-
-deploy_oc_unit() {
-    local unit="/etc/systemd/system/oc-free-proxy.service"
-    local want="Environment=ALL_PROXY=socks5://127.0.0.1:${SOCKS_PORT}"
-
-    if systemctl is-active --quiet oc-free-proxy \
-       && [ -f "$unit" ] && grep -qF "$want" "$unit" 2>/dev/null; then
-        log "oc-free-proxy active with correct config"
+    local target="${BIN_DIR}/oc-free-proxy.js"
+    if [ -f "$target" ]; then
+        log "oc-free-proxy.js already present"
         return 0
     fi
+    log "installing oc-free-proxy.js -> $target"
+    cat > "$target" <<'PROXYEOF'
+#!/usr/bin/env node
+// oc-free-proxy — Express proxy for OpenCode API (rynn-zeyn, fixed 2026-08-01)
+// Bind 127.0.0.1 (was 0.0.0.0 — unauthenticated LAN proxy). Free models anonymous.
+const express = require("express");
+const { createProxyMiddleware } = require("http-proxy-middleware");
+const https = require("https");
+const app = express();
+const PORT = 6446;
+const BIND_HOST = "127.0.0.1";
+const TARGET = "https://opencode.ai/zen";
+const UPSTREAM_AUTH = process.env.OC_UPSTREAM_AUTH || "";
+process.on("unhandledRejection", (e) => console.error(`[${new Date().toISOString()}] unhandledRejection: ${e.message}`));
+const FREE_MODELS = ["deepseek-v4-flash-free","ling-3.0-flash-free","mimo-v2.5-free","nemotron-3-ultra-free","north-mini-code-free","laguna-s-2.1-free"];
+const PAID_MODELS = ["glm-5.2","deepseek-v4-pro","kimi-k3","qwen3.6-plus","minimax-m3","gpt-5.6-sol","mimo-v2-free","hy3-free"];
+function allowedModels(){ return UPSTREAM_AUTH ? [...FREE_MODELS,...PAID_MODELS] : FREE_MODELS; }
+app.get("/health", (req,res)=>res.json({status:"ok"}));
+app.get("/v1/models", (req,res)=>{
+  const opt={ hostname:"opencode.ai", path:"/zen/v1/models", method:"GET", headers:{} };
+  if (UPSTREAM_AUTH) opt.headers.Authorization = UPSTREAM_AUTH;
+  const up=https.request(opt,(ur)=>{ let d=""; ur.on("data",c=>d+=c); ur.on("end",()=>{ try{ const m=JSON.parse(d); res.json({data:(m.data||[]).filter(x=>allowedModels().includes(x.id))}); }catch(e){ res.json({data:[]}); } }); });
+  up.on("error",()=>res.json({data:[]})); up.end();
+});
+app.use("/", createProxyMiddleware({ target:TARGET, changeOrigin:true, on:{
+  error:(e,req,res)=>{ console.error(`[${new Date().toISOString()}] Proxy error: ${e.message}`); res.status(502).json({error:"proxy_error",message:e.message}); },
+  proxyReq:(pr)=>{ pr.removeHeader("Authorization"); pr.removeHeader("authorization"); if (UPSTREAM_AUTH) pr.setHeader("Authorization",UPSTREAM_AUTH); }
+}}));
+app.listen(PORT, BIND_HOST, ()=>console.log(`[${new Date().toISOString()}] oc-free-proxy listening on ${BIND_HOST}:${PORT}`));
+PROXYEOF
+    chmod +x "$target"
 
-    cat > "$unit" <<EOF
+    # install deps (express + http-proxy-middleware) via npm into a project dir
+    local pdir="${HOME}/.opencode-proxy"
+    mkdir -p "$pdir"
+    [ -f "$pdir/package.json" ] || printf '{"name":"opencode-proxy","private":true,"version":"1.0.0"}\n' > "$pdir/package.json"
+    if [ ! -d "$pdir/node_modules/express" ] || [ ! -d "$pdir/node_modules/http-proxy-middleware" ]; then
+        log "npm install deps in $pdir (may need a moment)"
+        (cd "$pdir" && npm install --no-fund --no-audit express http-proxy-middleware >/dev/null 2>&1) \
+            || log "WARN: npm install failed — proxy will only work if deps are present"
+    fi
+    # point node at the project node_modules via NODE_PATH when launching
+    export NODE_PATH="$pdir/node_modules"
+    echo "$pdir" > "${BIN_DIR}/.oc-proxy-dir"
+}
+
+# ---------------------------------------------------------------------------
+# 4. oc-free-proxy systemd unit (content-checked, path-aware)
+# ---------------------------------------------------------------------------
+deploy_oc_unit() {
+    local unit="${SYSTEMD_DIR}/oc-free-proxy.service"
+    local want="Environment=ALL_PROXY=socks5://127.0.0.1:${SOCKS_PORT}"
+    local unit_name="oc-free-proxy.service"
+
+    systemctl_cmd is-active --quiet "$unit_name" 2>/dev/null \
+        && [ -f "$unit" ] && grep -qF "$want" "$unit" 2>/dev/null && {
+        log "oc-free-proxy active with correct config"
+        return 0
+    }
+
+    cat > "$unit" <<UNITEOF
 [Unit]
 Description=OC Free Proxy (OpenCode -> WARP)
 After=network.target
 
 [Service]
 Type=simple
-User=${RUN_USER}
 Environment=ALL_PROXY=socks5://127.0.0.1:${SOCKS_PORT}
-Environment=HOME=/home/${RUN_USER}
-ExecStart=/usr/bin/node /usr/local/bin/oc-free-proxy.js
+Environment=HOME=${HOME}
+Environment=NODE_PATH=${HOME}/.opencode-proxy/node_modules
+ExecStart=/usr/bin/node ${BIN_DIR}/oc-free-proxy.js
 Restart=always
 RestartSec=5
-WorkingDirectory=/home/${RUN_USER}
+WorkingDirectory=${HOME}/.opencode-proxy
 
 [Install]
-WantedBy=multi-user.target
-EOF
-    systemctl daemon-reload
-    systemctl enable --now oc-free-proxy >/dev/null 2>&1 || true
-    systemctl restart oc-free-proxy >/dev/null 2>&1 || true
-    log "wrote + restarted oc-free-proxy unit (port :${PROXY_PORT})"
+WantedBy=default.target
+UNITEOF
+    systemctl_cmd daemon-reload
+    systemctl_cmd enable --now "$unit_name" >/dev/null 2>&1 || true
+    systemctl_cmd restart "$unit_name" >/dev/null 2>&1 || true
+    log "wrote + started oc-free-proxy unit (port :${PROXY_PORT})"
 }
 
 # ---------------------------------------------------------------------------
-# 4. rotation timer (deploy if missing) + keep dead wg pool off
+# 5. rotation timer (deploy if missing, warp-cli present) + keep wg pool off
 # ---------------------------------------------------------------------------
 deploy_rotation() {
-    local rot="/usr/local/bin/warp-rotate"
+    if ! command -v warp-cli >/dev/null 2>&1; then
+        log "warp-cli absent — no rotation set up (proxy direct egress)"
+        return 0
+    fi
+    local rot="${BIN_DIR}/warp-rotate"
     if [ ! -f "$rot" ]; then
         cat > "$rot" <<'ROT'
 #!/usr/bin/env bash
 set -euo pipefail
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"; }
 log "=== WARP IP rotation ==="
-if ss -tn state established 2>/dev/null | grep ":6446" | awk '
-    { if ($1+0 > 0 || $2+0 > 0) { f=1 } }
-    END { exit (f ? 0 : 1) }'; then
-    log "SKIP: live traffic on :6446"
-    exit 0
+if ss -tn state established 2>/dev/null | grep ":6446" | awk '{ if ($1+0>0 || $2+0>0) f=1 } END { exit(f?0:1) }'; then
+  log "SKIP: live traffic on :6446"; exit 0
 fi
 OLD=$(curl -s --max-time 8 -x socks5h://127.0.0.1:40000 https://api.ipify.org 2>/dev/null || echo ?)
 warp-cli --accept-tos registration delete >/dev/null 2>&1 || true
@@ -145,142 +207,149 @@ ROT
         log "wrote rotation script $rot"
     fi
 
-    local svc="/etc/systemd/system/warp-rotate.service"
-    [ -f "$svc" ] || cat > "$svc" <<'SVC'
+    local svc="${SYSTEMD_DIR}/warp-rotate.service"
+    [ -f "$svc" ] || cat > "$svc" <<'SVCEOF'
 [Unit]
 Description=WARP IP Rotation
-
 [Service]
 Type=oneshot
-ExecStart=/usr/local/bin/warp-rotate
-SVC
+ExecStart=/var/tmp/warp-rotate
+SVCEOF
+    # fix any stale absolute path
+    sed -i "s|ExecStart=.*|ExecStart=${BIN_DIR}/warp-rotate|" "$svc"
 
-    local tmr="/etc/systemd/system/warp-rotate.timer"
-    [ -f "$tmr" ] || cat > "$tmr" <<'TMR'
+    local tmr="${SYSTEMD_DIR}/warp-rotate.timer"
+    [ -f "$tmr" ] || cat > "$tmr" <<'TMREOF'
 [Unit]
 Description=Rotate WARP IP every 20 min
-
 [Timer]
 OnBootSec=5min
 OnUnitActiveSec=20min
 RandomizedDelaySec=3min
 Persistent=true
-
 [Install]
 WantedBy=timers.target
-TMR
+TMREOF
 
-    systemctl daemon-reload
-    systemctl enable --now warp-rotate.timer >/dev/null 2>&1 || true
-    if systemctl is-active --quiet warp-rotate.timer; then
-        log "warp-rotate.timer active"
-    else
-        log "warp-rotate.timer not running (minor — use systemctl start warp-rotate.timer)"
-    fi
+    systemctl_cmd daemon-reload
+    systemctl_cmd enable --now warp-rotate.timer >/dev/null 2>&1 || true
+    systemctl_cmd is-active --quiet warp-rotate.timer && log "warp-rotate.timer active" || log "warp-rotate.timer not running"
 
-    systemctl disable --now wg-pool-rotate.timer >/dev/null 2>&1 || true
-    systemctl disable wg-pool-rotate.service >/dev/null 2>&1 || true
+    # never resurrect dead wg pool (system paths only matter if root)
+    is_root && { systemctl disable --now wg-pool-rotate.timer >/dev/null 2>&1 || true; systemctl disable wg-pool-rotate.service >/dev/null 2>&1 || true; } || true
 }
 
 # ---------------------------------------------------------------------------
-# 4b. daily heal-guard: verify registration + egress; re-heal if broken.
-#     20-min rotation can kill the registration mid-swap (delete ok, new fail);
-#     this standing guard catches any drop within a day and repairs it.
+# 6. heal-guard (daily) — only meaningful if warp-cli present
 # ---------------------------------------------------------------------------
 deploy_heal_guard() {
-    local guard="/usr/local/bin/warp-heal"
-    if [ ! -f "$guard" ]; then
-        cat > "$guard" <<'HEAL'
+    local guard="${BIN_DIR}/warp-heal"
+    local hs="${SYSTEMD_DIR}/warp-heal.service"
+    local ht="${SYSTEMD_DIR}/warp-heal.timer"
+
+    if ! command -v warp-cli >/dev/null 2>&1; then
+        log "warp-cli absent — no heal-guard"
+        return 0
+    fi
+
+    cat > "$guard" <<'HEALEOF'
 #!/usr/bin/env bash
-# warp-heal — daily guard: ensure WARP registration + egress are alive.
 set -euo pipefail
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"; }
-
 if ! warp-cli --accept-tos registration show >/dev/null 2>&1; then
-    log "registration missing — re-registering"
-    warp-cli --accept-tos registration delete >/dev/null 2>&1 || true
-    warp-cli --accept-tos registration new >/dev/null 2>&1 || true
-    warp-cli --accept-tos mode proxy >/dev/null 2>&1 || true
-    warp-cli --accept-tos connect >/dev/null 2>&1 || true
-    sleep 5
+  log "registration missing — re-registering"
+  warp-cli --accept-tos registration delete >/dev/null 2>&1 || true
+  warp-cli --accept-tos registration new >/dev/null 2>&1 || true
+  warp-cli --accept-tos mode proxy >/dev/null 2>&1 || true
+  warp-cli --accept-tos connect >/dev/null 2>&1 || true
+  sleep 5
 fi
-
-# egress sanity: expect a Cloudflare IP through the proxy
 eg=$(curl -s --max-time 8 -x socks5h://127.0.0.1:40000 https://api.ipify.org 2>/dev/null || echo "")
 case "$eg" in
   104.28.*|162.159.*|172.64.*) log "heal-ok: egress $eg" ;;
-  *) log "WARN: egress '$eg' not Cloudflare — running setup"
-     /usr/local/bin/setup-opencode-proxy.sh || true ;;
+  *) log "WARN: egress '$eg' not Cloudflare — run setup" ;;
 esac
-HEAL
-        chmod +x "$guard"
-        log "wrote heal-guard $guard"
-    fi
+HEALEOF
+    chmod +x "$guard"
 
-    local hs="/etc/systemd/system/warp-heal.service"
-    [ -f "$hs" ] || cat > "$hs" <<'HS'
+    [ -f "$hs" ] || cat > "$hs" <<'HSEOF'
 [Unit]
 Description=WARP heal-guard (daily)
-
 [Service]
 Type=oneshot
-ExecStart=/usr/local/bin/warp-heal
-HS
+ExecStart=/var/tmp/warp-heal
+HSEOF
+    sed -i "s|ExecStart=.*|ExecStart=${BIN_DIR}/warp-heal|" "$hs"
 
-    local ht="/etc/systemd/system/warp-heal.timer"
-    [ -f "$ht" ] || cat > "$ht" <<'HT'
+    [ -f "$ht" ] || cat > "$ht" <<'HTEOF'
 [Unit]
 Description=Run WARP heal-guard daily
-
 [Timer]
 OnBootSec=10min
 OnUnitActiveSec=24h
 RandomizedDelaySec=30min
 Persistent=true
-
 [Install]
 WantedBy=timers.target
-HT
+HTEOF
 
-    systemctl daemon-reload
-    systemctl enable --now warp-heal.timer >/dev/null 2>&1 || true
-    if systemctl is-active --quiet warp-heal.timer; then
-        log "warp-heal.timer active (daily guard)"
-    else
-        log "warp-heal.timer not running"
-    fi
+    systemctl_cmd daemon-reload
+    systemctl_cmd enable --now warp-heal.timer >/dev/null 2>&1 || true
+    systemctl_cmd is-active --quiet warp-heal.timer && log "warp-heal.timer active (daily guard)" || log "warp-heal.timer not running"
 }
 
 # ---------------------------------------------------------------------------
-# 5. opencode env (content-checked)
+# 7. opencode env (content-checked, path-aware)
 # ---------------------------------------------------------------------------
 write_opencode_env() {
-    local envfile="/etc/profile.d/opencode-proxy.sh"
+    # Root: write /etc/profile.d/opencode-proxy.sh (auto-sourced by login shells).
+    # Non-root: append directly to ~/.profile (a single file, not a dir).
+    local envfile
+    if is_root; then
+        envfile="/etc/profile.d/opencode-proxy.sh"
+        mkdir -p /etc/profile.d
+        write_env_to "$envfile"
+    else
+        envfile="${HOME}/.profile"
+        write_env_to "$envfile"
+        log "opencode proxy env in ~/.profile (source it or relogin)"
+    fi
+}
+
+write_env_to() {
+    local tgt="$1"
     local want="OPENCODE_BASE_URL=http://127.0.0.1:${PROXY_PORT}/v1"
-    if [ -f "$envfile" ] && grep -qF "$want" "$envfile"; then
-        log "opencode proxy env already correct"
+    if [ -f "$tgt" ] && grep -qF "$want" "$tgt"; then
+        log "opencode proxy env already correct ($tgt)"
         return 0
     fi
-    cat > "$envfile" <<EOF
-# opencode -> oc-free-proxy -> WARP (opencode-proxy-rotator)
-export ALL_PROXY=socks5://127.0.0.1:${SOCKS_PORT}
-export OPENCODE_BASE_URL=http://127.0.0.1:${PROXY_PORT}/v1
-EOF
-    log "wrote opencode proxy env to $envfile"
+    {
+        echo "# opencode -> oc-free-proxy -> WARP (opencode-proxy-rotator)"
+        echo "export ALL_PROXY=socks5://127.0.0.1:${SOCKS_PORT}"
+        echo "export OPENCODE_BASE_URL=http://127.0.0.1:${PROXY_PORT}/v1"
+    } >> "$tgt"
+    log "wrote opencode proxy env to $tgt"
 }
 
 proxy_healthy() {
-    curl -s --max-time 6 "http://127.0.0.1:${PROXY_PORT}/health" 2>/dev/null \
-        | grep -q '"status":"ok"'
+    curl -s --max-time 6 "http://127.0.0.1:${PROXY_PORT}/health" 2>/dev/null | grep -q '"status":"ok"'
 }
 
 # ---------------------------------------------------------------------------
 # main
 # ---------------------------------------------------------------------------
 main() {
+    # ensure a systemd user unit scope can run without lingering session
+    if ! is_root; then
+        local uid
+        uid="$(id -u)"
+        export XDG_RUNTIME_DIR="/run/user/$uid"
+    fi
+    log "mode: $(is_root && echo SYSTEM-Root || echo USER-nonroot)"
+
     kill_squatters
     start_warp
-    kill_squatters          # race guard: warp may have lost the port again
+    kill_squatters
     ensure_oc_proxy_js
     deploy_oc_unit
     deploy_rotation
@@ -289,19 +358,21 @@ main() {
     sleep 2
 
     echo "=== models via proxy ==="
-    curl -s --max-time 8 "http://127.0.0.1:${PROXY_PORT}/v1/models" 2>/dev/null \
-        | grep -oP '"id":"\K[^"]+' | sed 's/^/  - /' || true
+    curl -s --max-time 8 "http://127.0.0.1:${PROXY_PORT}/v1/models" 2>/dev/null | grep -oP '"id":"\K[^"]+' | sed 's/^/  - /' || true
 
-    echo -n "egress via WARP: "
+    echo -n "egress via proxy: "
     local eg
     eg=$(curl -s --max-time 8 -x socks5h://127.0.0.1:${SOCKS_PORT} https://api.ipify.org 2>/dev/null || echo "")
-    local ph="no"
-    proxy_healthy && ph="yes"
+    echo "$eg"
+    local ph="no"; proxy_healthy && ph="yes"
 
-    if [ "$ph" = "yes" ] && [ -n "$eg" ] && [[ "$eg" == 104.28.* ]]; then
-        log "ALL GREEN: proxy ok, WARP egress = $eg"
+    if [ "$ph" = "yes" ] && [ -n "$eg" ]; then
+        log "proxy OK (health=yes), egress=$eg"
+        # WARP-specific egress only when warp present AND Cloudflare
+        command -v warp-cli >/dev/null 2>&1 && [[ "$eg" == 104.28.* ]] \
+            && log "ALL GREEN: WARP egress $eg" || log "(no WARP tunnel or non-Cloudflare egress — direct is fine)"
     else
-        die "CHECK FAILED: proxy_healthy=$ph egress='$eg' — WARP tunnel not healthy"
+        die "CHECK FAILED: proxy_healthy=$ph egress='$eg'"
     fi
 }
 
