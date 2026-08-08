@@ -40,6 +40,17 @@ sudo apt update && sudo apt install cloudflare-warp
 
 warp-rotate.timer fires every 20 minutes. It deletes the WARP registration, registers a new one, and reconnects. The registration ID changes every cycle. The visible egress IP changes most of the time, but the free tier hands out a small pool, so the same IP can appear twice in a row. Don't read too much into a repeat.
 
+## Auto-sync (free model discovery)
+
+The proxy reads `free-models.json` next to it when present (built-in list is the fallback). `sync-models.sh` keeps that file fresh:
+
+- fetches the upstream free-model list (`*-free`)
+- **probes each candidate with a real chat** — only models that return 200 with a completion are kept (supervised: a model can be *listed* upstream but 401 on the anonymous tier, e.g. north-mini-code-free — probing skips it)
+- writes only working models to free-models.json, restarts oc-free-proxy if the list changed
+- runs daily via `sync-models.timer` (installed by the setup script)
+
+Run manually anytime: `sudo sync-models.sh` (or `sync-models.sh` as a normal user).
+
 ## Verify
 
 ```bash
