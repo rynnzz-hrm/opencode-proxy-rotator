@@ -61,5 +61,17 @@ curl -s http://127.0.0.1:6446/v1/models     # free model list
 
 ## Files
 
-- setup-opencode-proxy.sh — one-shot installer (sudo-free, idempotent, self-healing)
+- setup.sh — modular orchestrator (recommended): runs modules/ in order; each
+  module is standalone-testable (`bash modules/01-warp.sh` runs just WARP)
+  ```
+  modules/
+    01-warp.sh      kill orphan node squatters, bring up WARP (registration, drop-in, bind)
+    02-proxy.sh     install oc-free-proxy.js + npm deps + systemd unit
+    03-rotation.sh  rotation timer + daily heal-guard + disable dead wg pool
+    04-sync.sh      supervised free-model sync (probe before trust) + daily timer
+    05-env.sh       opencode env (global ALL_PROXY + OPENCODE_BASE_URL)
+    06-verify.sh    final health, models list, egress check (hard fail on breakage)
+    common.sh       shared helpers + path resolution (root vs user mode)
+  ```
+- setup-opencode-proxy.sh — monolith (same logic in one file; kept for old installs)
 - oc-free-proxy.js — the OpenAI-compatible proxy (installed by the setup script)
