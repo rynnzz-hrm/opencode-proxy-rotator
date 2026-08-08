@@ -61,6 +61,24 @@ start_warp() {
         return 0
     fi
 
+    # boot-recovery: ensure warp-svc restarts reliably after reboot/crash and
+    # is not throttled into a dead state by systemd's start-limit.
+    if [ "$(id -u)" -eq 0 ]; then
+        local wdrop="/etc/systemd/system/warp-svc.service.d"
+        if [ ! -f "$wdrop/restart.conf" ]; then
+            mkdir -p "$wdrop"
+            cat > "$wdrop/restart.conf" <<'WDROP'
+[Unit]
+StartLimitIntervalSec=0
+[Service]
+Restart=always
+RestartSec=10
+WDROP
+            systemctl daemon-reload >/dev/null 2>&1 || true
+            log "warp-svc restart-policy drop-in installed"
+        fi
+    fi
+
     warp-cli --accept-tos registration show >/dev/null 2>&1 && {
         log "warp registration present"
     } || {
@@ -79,7 +97,24 @@ start_warp() {
         fi
         sleep 1
     done
-    [ -n "$bound" ] || log "WARP did not bind :${SOCKS_PORT} (tunnel may need root/relogin) — proxying direct"
+    if [ -n "$bound" ]; then
+        log "WARP bound :${SOCKS_PORT}"
+        return 0
+    fi
+
+    # tunnel registered but not listening — try a gentle reconnect before giving
+    # up. warp-cli connect is idempotent and does NOT tear down a healthy tunnel.
+    log "WARP not bound :${SOCKS_PORT} — trying reconnect"
+    warp-cli --accept-tos connect >/dev/null 2>&1 || true
+    sleep 2
+    for _ in $(seq 1 10); do
+        if ss -tln 2>/dev/null | grep -q ":$SOCKS_PORT"; then
+            bound="yes"
+            break
+        fi
+        sleep 1
+    done
+    [ -n "$bound" ] || log "WARP still not bound after reconnect — proxying direct"
 }
 
 # ---------------------------------------------------------------------------
@@ -165,7 +200,8 @@ deploy_oc_unit() {
     cat > "$unit" <<UNITEOF
 [Unit]
 Description=OC Free Proxy (OpenCode -> WARP)
-After=network.target
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
