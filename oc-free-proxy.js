@@ -18,7 +18,9 @@ const TARGET = "https://opencode.ai/zen";
 const UPSTREAM_AUTH = process.env.OC_UPSTREAM_AUTH || "";
 
 // parse JSON bodies (needed for the model gate below)
-app.use(express.json());
+// FIX 2026-08-07: express.json() defaults to 100kb — Sye's Telegram context
+// payloads exceed that and got 413. Raise to 25mb (matches upstream limits).
+app.use(express.json({ limit: "25mb" }));
 
 process.on("unhandledRejection", (e) => {
     console.error(`[${new Date().toISOString()}] unhandledRejection: ${e.message}`);
