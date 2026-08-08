@@ -7,6 +7,8 @@
 const express = require("express");
 const { createProxyMiddleware } = require("http-proxy-middleware");
 const https = require("https");
+const fs = require("fs");
+const path = require("path");
 
 const app = express();
 const PORT = 6446;
@@ -39,8 +41,25 @@ const FREE_MODELS = [
 const PAID_MODELS = ["glm-5.2", "deepseek-v4-pro", "kimi-k3", "qwen3.6-plus", "minimax-m3", "gpt-5.6-sol", "mimo-v2-free", "hy3-free"]; // need OC_UPSTREAM_AUTH
 
 function allowedModels() {
-    return UPSTREAM_AUTH ? [...FREE_MODELS, ...PAID_MODELS] : FREE_MODELS;
+    return UPSTREAM_AUTH ? [...FREE_MODELS_LIVE, ...PAID_MODELS] : FREE_MODELS_LIVE;
 }
+
+// AUTO-SYNC (Design B 2026-08-07): if a free-models.json sits next to this
+// script, it overrides FREE_MODELS. sync-models.sh writes only models it has
+// probed (real chat) as working. The built-in list remains the fallback when
+// the file is absent or malformed.
+const MODELS_FILE = path.join(__dirname, "free-models.json");
+function loadFreeModels() {
+    try {
+        const raw = fs.readFileSync(MODELS_FILE, "utf8");
+        const arr = JSON.parse(raw);
+        if (Array.isArray(arr) && arr.length > 0 && arr.every(m => typeof m === "string")) {
+            return arr;
+        }
+    } catch (e) { /* fall through to built-in */ }
+    return FREE_MODELS;
+}
+let FREE_MODELS_LIVE = loadFreeModels();
 
 // Health check (BEFORE catch-all proxy)
 app.get("/health", (req, res) => res.json({ status: "ok" }));
