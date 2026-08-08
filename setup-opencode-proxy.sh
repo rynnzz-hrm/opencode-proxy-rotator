@@ -108,7 +108,7 @@ process.on("unhandledRejection", (e) => console.error(`[${new Date().toISOString
 const FREE_MODELS = ["deepseek-v4-flash-free","ling-3.0-flash-free","mimo-v2.5-free","nemotron-3-ultra-free","laguna-s-2.1-free"];
 const PAID_MODELS = ["glm-5.2","deepseek-v4-pro","kimi-k3","qwen3.6-plus","minimax-m3","gpt-5.6-sol","mimo-v2-free","hy3-free"];
 function allowedModels(){ return UPSTREAM_AUTH ? [...FREE_MODELS,...PAID_MODELS] : FREE_MODELS; }
-app.use(express.json());
+app.use(express.json({ limit: "25mb" })); // 25mb: express default 100kb broke Sye Telegram payloads
 app.get("/health", (req,res)=>res.json({status:"ok"}));
 app.get("/v1/models", (req,res)=>{
   const opt={ hostname:"opencode.ai", path:"/zen/v1/models", method:"GET", headers:{} };
