@@ -73,5 +73,6 @@ curl -s http://127.0.0.1:6446/v1/models     # free model list
     06-verify.sh    final health, models list, egress check (hard fail on breakage)
     common.sh       shared helpers + path resolution (root vs user mode)
   ```
-- setup-opencode-proxy.sh — monolith (same logic in one file; kept for old installs)
+- setup-opencode-proxy.sh — monolith (same logic in one file; **LEGACY** — kept for
+  old installs and backward compat; new installs and all future fixes use setup.sh + modules/)
 - oc-free-proxy.js — the OpenAI-compatible proxy (installed by the setup script)
