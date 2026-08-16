@@ -20,6 +20,9 @@ write_env_to() {
         sed -i "/^$start_marker$/,/^$end_marker$/d" "$tgt"
         sed -i "/^export ALL_PROXY=/d" "$tgt"
         sed -i "/^export OPENCODE_BASE_URL=/d" "$tgt"
+        # drop the legacy bare comment line from pre-marker writes so repeated
+        # runs converge to exactly one block (round-4.1 cleanup)
+        sed -i "/^# opencode -> oc-free-proxy -> WARP (opencode-proxy-rotator)$/d" "$tgt"
     fi
 
     {
