@@ -75,9 +75,20 @@ This is deliberate: probes fail during IP rate-limits, and a shrunk allowlist
 
 ## Operator notes
 
+- **Fallback policy (fail-closed default).** If the WARP SOCKS dies, the proxy
+  normally FAILS CLOSED: requests get a visible 502 instead of silently
+  egressing via the ISP IP (whose opencode free quota would burn → ~20h 429
+  lockout). To allow the ISP fallback on a box you trust and monitor, set
+  `OC_ALLOW_DIRECT_FALLBACK=1` when installing (or add it to the unit's
+  Environment). `/usage` reports `failClosed` / `directFallback` /
+  `fallbackAllowed` so you can see which mode you're in.
+- **ALL_PROXY is conditional.** `05-env.sh` only exports ALL_PROXY while new
+  shells can actually reach the WARP SOCKS (`ss -tln` check). Proxy down on a
+  device => no ALL_PROXY => curl/git/npm just work direct instead of hanging
+  into a dead SOCKS. Proxy up => routed as usual.
 - WARP re-registration drops the SOCKS socket briefly (~8-30s); long-lived
   clients (Telegram long-poll, streams) may reconnect. If a user's internet
   routes through this box, they'll see the same blip.
 - Same-IP rotation repeats are normal — check the registration ID, not the IP.
-- `ALL_PROXY` in the unit/profile is vestigial for node; keep it only for
-  curl/wget-based tooling.
+- `ALL_PROXY` in the profile is vestigial for node (node ignores it); keep it
+  for curl/wget-based tooling.

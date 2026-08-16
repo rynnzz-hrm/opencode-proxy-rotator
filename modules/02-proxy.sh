@@ -45,6 +45,7 @@ Type=simple
 Environment=HOME=${HOME}
 Environment=NODE_PATH=${HOME}/.opencode-proxy/node_modules
 Environment=USAGE_ALERT_TOKENS=${USAGE_ALERT_TOKENS:-5000000}
+Environment=OC_ALLOW_DIRECT_FALLBACK=${OC_ALLOW_DIRECT_FALLBACK:-0}
 ExecStart=/usr/bin/node ${BIN_DIR}/oc-free-proxy.js
 Restart=always
 RestartSec=5

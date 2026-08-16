@@ -28,11 +28,19 @@ const UPSTREAM_AUTH = process.env.OC_UPSTREAM_AUTH || "";
 const WARP_SOCKS = "socks5://127.0.0.1:40000";
 const socksAgent = new SocksProxyAgent(WARP_SOCKS);
 
-// AUTO-ROUTE (2026-08-13): the proxy must never hard-fail when warp-svc is
-// down. egressMode toggles per refreshIp() probe: warp reachable => route via
-// WARP socks; warp unreachable => fall back to DIRECT egress (ISP) so the
-// proxy target (:6446) stays alive and laptop/profile.d ALL_PROXY clients
-// don't lose internet until a manual proxy toggle.
+// FALLBACK POLICY (2026-08-16 audit round 3): when warp-svc is unreachable the
+// proxy MAY egress direct via the ISP IP — which burns the opencode free quota
+// (20h lockout). Default is FAIL-CLOSED (502) so a random device never silently
+// burns its ISP IP. Set OC_ALLOW_DIRECT_FALLBACK=1 ONLY on the box you trust +
+// monitor; the healthcheck alerts either way.
+const ALLOW_DIRECT_FALLBACK = process.env.OC_ALLOW_DIRECT_FALLBACK === "1";
+let warpDown = false;
+
+// AUTO-ROUTE (2026-08-13, hardened round 3): when warp-svc is down, behavior
+// depends on OC_ALLOW_DIRECT_FALLBACK: set => direct/ISP egress (proxy target
+// :6446 stays alive for ALL_PROXY clients — laptop keeps internet); unset
+// (default) => FAIL CLOSED (502), so a random device never silently burns the
+// ISP IP's opencode quota. egressMode toggles per refreshIp() probe.
 let egressMode = "warp";
 // Egress dispatch (2026-08-16 audit): a plain dispatcher over two REAL agents —
 // socksAgent (WARP) and directAgent (ISP fallback). The old version subclassed
@@ -99,6 +107,7 @@ function refreshIp() {
             const ip = d.trim();
             if (ip) {
                 warpIp = ip;
+                warpDown = false;
                 if (egressMode !== "warp") {
                     egressMode = "warp";
                     console.log(`[${new Date().toISOString()}] egress -> WARP (ip ${ip})`);
@@ -110,7 +119,14 @@ function refreshIp() {
         });
     });
     req.on("error", () => {
+        warpDown = true;
         if (egressMode !== "direct") {
+            if (!ALLOW_DIRECT_FALLBACK) {
+                // fail closed (audit round 3): requests keep routing via the
+                // dead (warp) agent and 502 — visible, quota-safe, no ISP burn
+                console.warn(`[${new Date().toISOString()}] WARP unreachable + OC_ALLOW_DIRECT_FALLBACK unset — FAILING CLOSED (502s). Set OC_ALLOW_DIRECT_FALLBACK=1 to allow ISP fallback.`);
+                return;
+            }
             egressMode = "direct";
             console.warn(`[${new Date().toISOString()}] egress -> DIRECT (warp-svc unreachable) — auto-route fallback (ISP IP: watch quota)`);
             // Race fix (2026-08-16 audit): label the flip NOW but DON'T zero the
@@ -233,6 +249,8 @@ app.get("/usage", (req, res) => {
         warpIp: warpIp || null,
         directIp: directIp || null,
         directFallback: egressMode === "direct",
+        failClosed: warpDown && !ALLOW_DIRECT_FALLBACK,
+        fallbackAllowed: ALLOW_DIRECT_FALLBACK,
         windowStart: new Date(usage.windowStart).toISOString(),
         windowSeconds: Math.round((Date.now() - usage.windowStart) / 1000),
         requests: usage.requests,

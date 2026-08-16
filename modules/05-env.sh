@@ -7,24 +7,34 @@ export COMMON_LOADED=1
 
 write_env_to() {
     local tgt="$1"
-    local want="OPENCODE_BASE_URL=http://127.0.0.1:${PROXY_PORT}/v1"
-    local all_proxy="ALL_PROXY=socks5://127.0.0.1:${SOCKS_PORT}"
-    if [ -f "$tgt" ] && grep -qF "export $want" "$tgt" && grep -qF "export $all_proxy" "$tgt"; then
-        log "opencode proxy env already correct ($tgt)"
-        return 0
+    local socks_port="${SOCKS_PORT:-40000}"
+    local proxy_port="${PROXY_PORT:-6446}"
+    # the whole block is managed between markers; a rerun with a different port
+    # REPLACES the block instead of appending a duplicate ALL_PROXY line
+    local start_marker="# >>> opencode-proxy-rotator env block >>>"
+    local end_marker="# <<< opencode-proxy-rotator env block <<<"
+
+    # if the block already exists in the target, drop it (both old 2-line form
+    # and marker form) so re-runs converge instead of stacking
+    if [ -f "$tgt" ]; then
+        sed -i "/^$start_marker$/,/^$end_marker$/d" "$tgt"
+        sed -i "/^export ALL_PROXY=/d" "$tgt"
+        sed -i "/^export OPENCODE_BASE_URL=/d" "$tgt"
     fi
-    # AUDIT FIX 2026-08-16: old dedup only checked OPENCODE_BASE_URL, so a rerun
-    # with a different SOCKS_PORT appended a SECOND ALL_PROXY line (stale port
-    # wins — the exact cross-device inconsistency). Replace in place, never dup.
-    if [ -f "$tgt" ] && grep -qE '^[[:space:]]*export ALL_PROXY=' "$tgt"; then
-        sed -i "s|^[[:space:]]*export ALL_PROXY=.*|export $all_proxy|" "$tgt"
-    else
-        {
-            echo "# opencode -> oc-free-proxy -> WARP (opencode-proxy-rotator)"
-            echo "export $all_proxy"
-        } >> "$tgt"
-    fi
-    grep -qF "export $want" "$tgt" 2>/dev/null || echo "export $want" >> "$tgt"
+
+    {
+        echo "$start_marker"
+        echo "# opencode -> oc-free-proxy -> WARP (opencode-proxy-rotator)"
+        # ALL_PROXY only when the WARP SOCKS is actually listening (round 3).
+        # A dead ALL_PROXY makes every new shell's curl/git/npm silently hang on
+        # devices where WARP/proxy is down. Conditional export: proxy up =>
+        # routed (Option 2 preserved); proxy down => no ALL_PROXY, shells work.
+        echo "if ss -tln 2>/dev/null | grep -q \":${socks_port} \"; then"
+        echo "    export ALL_PROXY=socks5://127.0.0.1:${socks_port}"
+        echo "fi"
+        echo "export OPENCODE_BASE_URL=http://127.0.0.1:${proxy_port}/v1"
+        echo "$end_marker"
+    } >> "$tgt"
     log "wrote opencode proxy env to $tgt"
 }
 
