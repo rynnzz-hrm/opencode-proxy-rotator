@@ -18,6 +18,7 @@ COOLDOWN="$STATE_DIR/heal-cooldown"
 HEAL_COUNT="$STATE_DIR/heal-count"
 DEEP_MARKER="$STATE_DIR/deep-check"
 DEEP_BODY="$STATE_DIR/deep-body.json"
+DEEP_HEADERS="$STATE_DIR/deep-headers.txt"
 
 # root/system unit, or user units: pick the right systemctl wrapper
 if command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then SC="sudo -n systemctl"; else SC="systemctl --user"; fi
@@ -42,6 +43,23 @@ if [ -f "$DEEP_MARKER" ] && [ $(( $(now) - $(stat -c %Y "$DEEP_MARKER") )) -lt 1
 # heal cooldown: recently healed → observe, don't burn more quota
 if [ -f "$COOLDOWN" ] && [ $(( $(now) - $(stat -c %Y "$COOLDOWN") )) -lt 1200 ]; then exit 0; fi
 
+# usage alert → rotate NOW (2026-08-16 audit: checkAlert() only console.warned;
+# NOTHING acted on /usage. The proxy's alert threshold is the last line of
+# defense before the ~20h lockout — rotate the moment it fires, cooldown-gated
+# so a persistent alert can't thrash rotation while the window resets).
+if curl -s --max-time 6 http://127.0.0.1:6446/usage 2>/dev/null | grep -q '"alertFired":true'; then
+    log "ALERT: /usage alertFired (estTokens >= threshold) — rotating WARP NOW"
+    if $SC start warp-rotate.service >/dev/null 2>&1; then
+        log "HEAL: warp-rotate.service started (usage-alert rotation)"
+        touch "$COOLDOWN"
+        exit 0
+    else
+        log "HEAL-FAIL: could not start warp-rotate.service (SC=$SC)"
+        touch "$COOLDOWN"
+        exit 1
+    fi
+fi
+
 touch "$DEEP_MARKER"
 
 # egress check via the WARP socks (ipinfo is Google-hosted → real tunnel egress)
@@ -56,14 +74,21 @@ fi
 
 # deep chat — only when the egress gate passed (CF egress present)
 if [ "$eg_ok" = "1" ]; then
-    code=$(curl -s --max-time 40 -o "$DEEP_BODY" -w '%{http_code}' -X POST http://127.0.0.1:6446/v1/chat/completions \
+    code=$(curl -s --max-time 40 -D "$DEEP_HEADERS" -o "$DEEP_BODY" -w '%{http_code}' -X POST http://127.0.0.1:6446/v1/chat/completions \
       -H "Content-Type: application/json" -d '{"model":"deepseek-v4-flash-free","messages":[{"role":"user","content":"ping"}],"max_tokens":1}' 2>/dev/null || echo 000)
     if [ "$code" = "200" ] && grep -q '"choices"' "$DEEP_BODY" 2>/dev/null; then
         exit 0
     fi
     if [ "$code" = "429" ]; then
-        # quota-exhausted on this IP — NOT a broken proxy. Observe, do NOT heal-thrash.
-        log "OBSERVE: deep chat 429 (per-IP quota on egress=$eg) — waiting for rotation"
+        # AUDIT FIX 2026-08-16: distinguish LOCAL throttle (express-rate-limit
+        # 45/min,1800/h,2400/d on :6446) from UPSTREAM quota. A local 429 means
+        # the proxy itself is throttling — healthy, NOT broken, and healing a
+        # throttle storm would only compound it. Only upstream 429 = quota lock.
+        if cat "$DEEP_HEADERS" 2>/dev/null | grep -qiE '^(RateLimit|Retry-After)'; then
+            log "OBSERVE: deep chat 429 from LOCAL proxy throttle — proxy healthy, not healing"
+        else
+            log "OBSERVE: deep chat 429 (upstream per-IP quota on egress=$eg) — waiting for rotation"
+        fi
         exit 0
     fi
     log "FAIL: deep-check chat through :6446 broken (code=$code egress=$eg)"
@@ -95,16 +120,25 @@ if [ "$eg2_ok" != "1" ] || [ "$eg2" = "$eg" ]; then
     sleep 20
 fi
 if [ "$eg2_ok" != "1" ]; then
-    # tunnel still not on Cloudflare — run the actual tunnel repair
-    if [ -x /usr/local/bin/warp-heal ]; then
-        log "HEAL: tunnel repair (warp-heal)"
-        /usr/local/bin/warp-heal >> "$LOG" 2>&1 || log "HEAL-FAIL: warp-heal exit $?"
+    # tunnel still not on Cloudflare — run the actual tunnel repair.
+    # AUDIT FIX 2026-08-16: user-mode installs put warp-heal in ~/.local/bin
+    # (common.sh BIN_DIR), root in /usr/local/bin — the old hardcoded root path
+    # silently no-oped on a normal non-root box.
+    WARP_HEAL=""
+    for p in /usr/local/bin/warp-heal "$HOME/.local/bin/warp-heal"; do
+        if [ -x "$p" ]; then WARP_HEAL="$p"; break; fi
+    done
+    if [ -n "$WARP_HEAL" ]; then
+        log "HEAL: tunnel repair (warp-heal via $WARP_HEAL)"
+        "$WARP_HEAL" >> "$LOG" 2>&1 || log "HEAL-FAIL: warp-heal exit $?"
         sleep 10
+    else
+        log "HEAL-NOOP: warp-heal binary not found (looked: /usr/local/bin, $HOME/.local/bin)"
     fi
 fi
 
 # post-heal verification
-code2=$(curl -s --max-time 40 -o "$DEEP_BODY" -w '%{http_code}' -X POST http://127.0.0.1:6446/v1/chat/completions \
+code2=$(curl -s --max-time 40 -D "$DEEP_HEADERS" -o "$DEEP_BODY" -w '%{http_code}' -X POST http://127.0.0.1:6446/v1/chat/completions \
   -H "Content-Type: application/json" -d '{"model":"deepseek-v4-flash-free","messages":[{"role":"user","content":"ping"}],"max_tokens":1}' 2>/dev/null || echo 000)
 if [ "$code2" = "200" ] && grep -q '"choices"' "$DEEP_BODY" 2>/dev/null; then
     log "HEAL: verified — chat 200 after heal"

@@ -15,14 +15,14 @@ deploy_rotation() {
     log "installed warp-rotate -> $rot (from repo root — ipinfo probe + reg-ID verify + flock)"
 
     local svc="${SYSTEMD_DIR}/warp-rotate.service"
-    [ -f "$svc" ] || cat > "$svc" <<'SVCEOF'
+    # write the final ExecStart directly — no placeholder + sed fixup (2026-08-16 audit)
+    [ -f "$svc" ] || cat > "$svc" <<SVCEOF
 [Unit]
 Description=WARP IP Rotation
 [Service]
 Type=oneshot
-ExecStart=/var/tmp/warp-rotate
+ExecStart=${BIN_DIR}/warp-rotate
 SVCEOF
-    sed -i "s|ExecStart=.*|ExecStart=${BIN_DIR}/warp-rotate|" "$svc"
 
     local tmr="${SYSTEMD_DIR}/warp-rotate.timer"
     [ -f "$tmr" ] || cat > "$tmr" <<'TMREOF'
@@ -53,14 +53,13 @@ deploy_heal_guard() {
     install -m 0755 "$guard_src" "$guard"
     log "installed warp-heal -> $guard (from repo root — ipinfo probe)"
 
-    [ -f "$hs" ] || cat > "$hs" <<'HSEOF'
+    [ -f "$hs" ] || cat > "$hs" <<HSEOF
 [Unit]
 Description=WARP heal-guard (daily)
 [Service]
 Type=oneshot
-ExecStart=/var/tmp/warp-heal
+ExecStart=${BIN_DIR}/warp-heal
 HSEOF
-    sed -i "s|ExecStart=.*|ExecStart=${BIN_DIR}/warp-heal|" "$hs"
 
     [ -f "$ht" ] || cat > "$ht" <<'HTEOF'
 [Unit]

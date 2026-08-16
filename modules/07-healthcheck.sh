@@ -16,14 +16,14 @@ deploy_healthcheck() {
     install -m 0755 "$hc_src" "$hc"
     log "installed proxy-healthcheck.sh -> $hc (from repo root — cooldown-before-chat, 429-observe, circuit breaker)"
 
-    cat > "$hs" <<'HSEOF'
+    # write the final ExecStart directly — no placeholder + sed fixup (2026-08-16 audit)
+    cat > "$hs" <<HSEOF
 [Unit]
 Description=Proxy healthcheck (1-min, auto-heal)
 [Service]
 Type=oneshot
-ExecStart=/var/tmp/proxy-healthcheck.sh
+ExecStart=${BIN_DIR}/proxy-healthcheck.sh
 HSEOF
-    sed -i "s|ExecStart=.*|ExecStart=${BIN_DIR}/proxy-healthcheck.sh|" "$hs"
 
     cat > "$ht" <<'HTEOF'
 [Unit]

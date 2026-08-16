@@ -11,14 +11,14 @@ deploy_sync() {
     log "installed sync-models.sh -> $sync (from repo root — merge-only + socks probe)"
 
     local ss="${SYSTEMD_DIR}/sync-models.service"
-    [ -f "$ss" ] || cat > "$ss" <<'SSEOF'
+    # write the final ExecStart directly — no placeholder + sed fixup (2026-08-16 audit)
+    [ -f "$ss" ] || cat > "$ss" <<SSEOF
 [Unit]
 Description=Sync opencode free models (supervised probe)
 [Service]
 Type=oneshot
-ExecStart=/var/tmp/sync-models.sh
+ExecStart=${BIN_DIR}/sync-models.sh
 SSEOF
-    sed -i "s|ExecStart=.*|ExecStart=${BIN_DIR}/sync-models.sh|" "$ss"
 
     local st="${SYSTEMD_DIR}/sync-models.timer"
     [ -f "$st" ] || cat > "$st" <<'STEOF'

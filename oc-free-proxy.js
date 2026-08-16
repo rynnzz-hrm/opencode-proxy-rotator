@@ -7,6 +7,7 @@
 const express = require("express");
 const { createProxyMiddleware } = require("http-proxy-middleware");
 const https = require("https");
+const os = require("os");
 const fs = require("fs");
 const path = require("path");
 const { SocksProxyAgent } = require("socks-proxy-agent");
@@ -33,22 +34,25 @@ const socksAgent = new SocksProxyAgent(WARP_SOCKS);
 // proxy target (:6446) stays alive and laptop/profile.d ALL_PROXY clients
 // don't lose internet until a manual proxy toggle.
 let egressMode = "warp";
-class EgressAgent extends https.Agent {
-    constructor() { super({ keepAlive: true }); }
+// Egress dispatch (2026-08-16 audit): a plain dispatcher over two REAL agents —
+// socksAgent (WARP) and directAgent (ISP fallback). The old version subclassed
+// https.Agent then delegated addRequest to another agent — a phantom pool that
+// never held a connection. Dispatch is decided per request, no fake Agent.
+const directAgent = new https.Agent({ keepAlive: true });
+const egressAgent = {
     addRequest(req, opts) {
-        if (egressMode === "warp") return socksAgent.addRequest(req, opts);
-        return super.addRequest(req, opts);
-    }
-}
-const egressAgent = new EgressAgent();
+        return (egressMode === "warp" ? socksAgent : directAgent).addRequest(req, opts);
+    },
+};
 
 // --- per-IP usage tracker (2026-08-09) --------------------------------------
 // AUDIT FIX 2026-08-16: track BOTH egress paths (WARP + direct/ISP) and label
 // the ACTIVE one honestly. The old version only ever set usage.ip from the
 // socks probe, so mode=direct showed a STALE WARP IP while the ISP IP burned
 // quota invisibly (the 20h-lockout vector). Window resets on mode flip too.
-const USAGE_FILE = path.join(process.env.HOME || "/home/rynn", ".oc-usage.json");
-const HISTORY_FILE = path.join(process.env.HOME || "/home/rynn", ".oc-usage-history.jsonl");
+const HOME_DIR = process.env.HOME || os.homedir();
+const USAGE_FILE = path.join(HOME_DIR, ".oc-usage.json");
+const HISTORY_FILE = path.join(HOME_DIR, ".oc-usage-history.jsonl");
 const ALERT_TOKENS = parseInt(process.env.USAGE_ALERT_TOKENS || "0", 10) || 0;
 let usage = { ip: "unknown", windowStart: Date.now(), requests: 0, inBytes: 0, outBytes: 0, alerted: false };
 let warpIp = "";
@@ -108,8 +112,12 @@ function refreshIp() {
     req.on("error", () => {
         if (egressMode !== "direct") {
             egressMode = "direct";
-            console.warn(`[${new Date().toISOString()}] egress -> DIRECT (warp-svc unreachable) — auto-route fallback`);
-            resetUsageWindow(directIp || "direct-unknown");
+            console.warn(`[${new Date().toISOString()}] egress -> DIRECT (warp-svc unreachable) — auto-route fallback (ISP IP: watch quota)`);
+            // Race fix (2026-08-16 audit): label the flip NOW but DON'T zero the
+            // window here — probeDirectIp() confirms the real direct IP and
+            // resets once on change. Resetting twice fragments usage history.
+            usage.ip = directIp || "direct-unknown";
+            saveUsage();
         }
     });
     probeDirectIp();
@@ -182,6 +190,7 @@ app.get("/health", (req, res) => res.json({ status: "ok" }));
 const MODELS_CACHE_TTL = 60_000;
 let modelsCache = { data: null, at: 0 };
 app.get("/v1/models", (req, res) => {
+    usage.requests += 1; // audit fix: /v1/models polls were untracked traffic
     if (modelsCache.data && Date.now() - modelsCache.at < MODELS_CACHE_TTL) {
         return res.json(modelsCache.data);
     }
@@ -223,6 +232,7 @@ app.get("/usage", (req, res) => {
         ip: usage.ip,            // ACTIVE egress IP (warp IP when warp, ISP IP when direct)
         warpIp: warpIp || null,
         directIp: directIp || null,
+        directFallback: egressMode === "direct",
         windowStart: new Date(usage.windowStart).toISOString(),
         windowSeconds: Math.round((Date.now() - usage.windowStart) / 1000),
         requests: usage.requests,
@@ -269,6 +279,14 @@ app.use("/", createProxyMiddleware({
             proxyRes.on("data", (chunk) => { usage.outBytes += chunk.length; });
         },
         proxyReq: (proxyReq, req) => {
+            // Audit fix: count proxied traffic that is NOT /v1/chat/completions
+            // (the gate counted chat already) — /usage must see ALL requests.
+            if (!/\/v1\/chat\/completions$/.test(req.url)) {
+                usage.requests += 1;
+                usage.inBytes += req.headers["content-length"]
+                    ? parseInt(req.headers["content-length"], 10)
+                    : Buffer.byteLength(JSON.stringify(req.body || {}));
+            }
             // Strip the client's Authorization header — it would be forwarded upstream
             // and cause 401 Invalid API key (the free tier is anonymous).
             proxyReq.removeHeader("Authorization");
