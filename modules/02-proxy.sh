@@ -27,9 +27,15 @@ deploy_oc_unit() {
     local unit="${SYSTEMD_DIR}/oc-free-proxy.service"
     local unit_name="oc-free-proxy.service"
 
-    # sentinel: socks-proxy-agent in the js proves the FIXED proxy is deployed
+    # sentinel: the js must contain the current feature markers — socks-proxy-agent
+    # (present since round 1) AND the round-3 env var. Checking only the socks
+    # marker would skip rewriting the unit on an already-installed box, silently
+    # missing OC_ALLOW_DIRECT_FALLBACK (round-4 fix).
     systemctl_cmd is-active --quiet "$unit_name" 2>/dev/null \
-        && [ -f "$unit" ] && grep -qF "socks-proxy-agent" "${BIN_DIR}/oc-free-proxy.js" 2>/dev/null && {
+        && [ -f "$unit" ] \
+        && grep -qF "socks-proxy-agent" "${BIN_DIR}/oc-free-proxy.js" 2>/dev/null \
+        && grep -qF "OC_ALLOW_DIRECT_FALLBACK" "${BIN_DIR}/oc-free-proxy.js" 2>/dev/null \
+        && grep -qF "OC_ALLOW_DIRECT_FALLBACK" "$unit" 2>/dev/null && {
         log "oc-free-proxy active with correct config"
         return 0
     }
