@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# warp-heal — WARP tunnel repair (called by proxy-healthcheck when egress is not CF)
+# AUDIT FIX 2026-08-16: probe ipinfo.io (Google-hosted) instead of api.ipify.org
+# (CF-hosted — WARP terminates CF traffic in CF's PoP, so api.ipify ALWAYS showed
+# a CF-range PoP address and this script always logged "heal-ok" even when the
+# real tunnel egress was dead). ipinfo shows the REAL tunnel egress.
+set -euo pipefail
+log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"; }
+if ! warp-cli --accept-tos registration show >/dev/null 2>&1; then
+  log "registration missing — re-registering"
+  warp-cli --accept-tos registration delete >/dev/null 2>&1 || true
+  warp-cli --accept-tos registration new >/dev/null 2>&1 || true
+  warp-cli --accept-tos mode proxy >/dev/null 2>&1 || true
+  warp-cli --accept-tos connect >/dev/null 2>&1 || true
+  sleep 5
+fi
+eg=$(curl -s --max-time 8 -x socks5h://127.0.0.1:40000 https://ipinfo.io/ip 2>/dev/null || echo "")
+case "$eg" in
+  104.28.*|162.159.*|172.64.*) log "heal-ok: egress $eg" ;;
+  *) log "WARN: egress '$eg' not Cloudflare — run setup" ;;
+esac

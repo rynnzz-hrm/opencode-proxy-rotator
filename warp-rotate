@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+# warp-rotate — rotate WARP egress IP via warp-cli (simple, no wg pool)
+# Runs as root via systemd timer every 20 min.
+# Why: oc-free-proxy's ALL_PROXY=socks5://127.0.0.1:40000 → warp-svc.
+# Rotating the registration gives a fresh Cloudflare egress IP.
+# The old wg-pool-rotate (NM/wgcf) is disabled: 29/30 pool keys dead.
+#
+# AUDIT FIXES 2026-08-16:
+#  - probe ipinfo.io (Google-hosted) instead of api.ipify.org (Cloudflare-hosted):
+#    WARP terminates CF-destined traffic inside CF's PoP, so api.ipify ALWAYS
+#    showed the same PoP service address — the old probe structurally could not
+#    see egress change (the "same IP -> same IP" lie).
+#  - log registration ID before/after as ground truth (ID flip = rotation ran).
+#  - poll warp-cli status until Connected instead of a blind sleep.
+#  - flock: the timer and the healthcheck's heal ladder can trigger concurrently.
+#  - traffic guard: ANY established conn on :6446 = skip (old queue-depth check
+#    never fired — idle-but-alive streams have ~0 queue depth; 0 SKIPs in 102 runs).
+
+set -euo pipefail
+
+LOCK="/run/warp-rotate.lock"
+exec 9>"$LOCK"
+if ! flock -n 9; then
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] SKIP: another rotation is already running"
+    exit 0
+fi
+
+log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"; }
+
+log "=== WARP IP rotation ==="
+
+# Real-traffic guard: skip rotation if there is ANY established conn through :6446
+# (long-running AI trading streams get killed mid-rotation otherwise).
+if ss -tn state established 2>/dev/null | grep -qE ":6446([^0-9]|$)"; then
+    active=$(ss -tn state established 2>/dev/null | grep -E ":6446([^0-9]|$)" | awk '{print $4}' | tr '\n' ' ')
+    log "SKIP rotation: live traffic on :6446 ($active)"
+    exit 0
+fi
+log "No live traffic on :6446, proceeding"
+
+# Ground truth: registration ID (flips on every successful re-registration)
+OLD_REG=$(warp-cli --accept-tos registration show 2>/dev/null | grep -oP 'ID: \K[0-9a-f-]+' | head -1 || echo "?")
+
+# Capture old egress IP — NON-Cloudflare endpoint (ipinfo.io is Google-hosted)
+OLD_IP=$(curl -s --max-time 10 -x socks5h://127.0.0.1:40000 https://ipinfo.io/ip 2>/dev/null || echo "?")
+
+warp-cli --accept-tos registration delete >/dev/null 2>&1 || true
+sleep 1
+warp-cli --accept-tos registration new >/dev/null 2>&1 || true
+warp-cli --accept-tos mode proxy >/dev/null 2>&1 || true
+warp-cli --accept-tos connect >/dev/null 2>&1 || true
+
+# Readiness poll instead of blind sleep: wait up to 30s for Connected
+for _ in $(seq 1 15); do
+    if warp-cli --accept-tos status 2>/dev/null | grep -qiE "\bConnected\b"; then
+        break
+    fi
+    sleep 2
+done
+
+NEW_REG=$(warp-cli --accept-tos registration show 2>/dev/null | grep -oP 'ID: \K[0-9a-f-]+' | head -1 || echo "?")
+NEW_IP=$(curl -s --max-time 10 -x socks5h://127.0.0.1:40000 https://ipinfo.io/ip 2>/dev/null || echo "?")
+
+if [ "$OLD_REG" != "?" ] && [ "$NEW_REG" != "?" ] && [ "$OLD_REG" = "$NEW_REG" ]; then
+    log "FAIL: registration ID unchanged ($OLD_REG) — rotation did NOT execute"
+    exit 1
+fi
+if [ "$NEW_REG" = "?" ]; then
+    log "FAIL: could not read registration ID after rotation — warp-cli broken?"
+    exit 1
+fi
+log "Egress IP: $OLD_IP -> $NEW_IP (reg $OLD_REG -> $NEW_REG)"
+log "=== Rotation complete ==="

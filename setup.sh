@@ -16,6 +16,7 @@
 #   04-sync.sh     supervised free-model sync (probe before trust) + daily timer
 #   05-env.sh      opencode env (global ALL_PROXY + OPENCODE_BASE_URL)
 #   06-verify.sh   final health, models list, egress check (hard fail on breakage)
+#   07-healthcheck.sh 1-min healthcheck + auto-heal (restart proxy / rotate WARP on deep FAIL)
 #
 # Every module is standalone-testable: `bash modules/01-warp.sh` runs that
 # module alone. The orchestrator just sequences them.
@@ -55,5 +56,6 @@ run 03-rotation.sh
 run 04-sync.sh
 run 05-env.sh
 run 06-verify.sh
+run 07-healthcheck.sh
 
 log "== setup complete =="
