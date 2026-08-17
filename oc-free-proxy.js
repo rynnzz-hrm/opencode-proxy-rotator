@@ -42,16 +42,19 @@ let warpDown = false;
 // (default) => FAIL CLOSED (502), so a random device never silently burns the
 // ISP IP's opencode quota. egressMode toggles per refreshIp() probe.
 let egressMode = "warp";
-// Egress dispatch (2026-08-16 audit): a plain dispatcher over two REAL agents —
-// socksAgent (WARP) and directAgent (ISP fallback). The old version subclassed
-// https.Agent then delegated addRequest to another agent — a phantom pool that
-// never held a connection. Dispatch is decided per request, no fake Agent.
+// Egress dispatch (2026-08-16 audit rounds 2 & 5): a REAL https.Agent subclass
+// that delegates per-mode to socksAgent (WARP) or directAgent (ISP fallback).
+// A plain-object dispatcher failed https.request's TLS path with EPROTO
+// wrong-version (Node needs an Agent instance for proper socket creation), so
+// the subclass pattern is kept — it's the standard socks-proxy-agent interop.
 const directAgent = new https.Agent({ keepAlive: true });
-const egressAgent = {
+class EgressAgent extends https.Agent {
+    constructor() { super({ keepAlive: true }); }
     addRequest(req, opts) {
         return (egressMode === "warp" ? socksAgent : directAgent).addRequest(req, opts);
-    },
-};
+    }
+}
+const egressAgent = new EgressAgent();
 
 // --- per-IP usage tracker (2026-08-09) --------------------------------------
 // AUDIT FIX 2026-08-16: track BOTH egress paths (WARP + direct/ISP) and label
@@ -224,10 +227,20 @@ app.get("/v1/models", (req, res) => {
         upRes.on("end", () => {
             try {
                 const models = JSON.parse(data);
-                const allow = allowedModels();
-                const body = { data: (models.data || []).filter(m => allow.includes(m.id)) };
-                modelsCache = { data: body, at: Date.now() };
-                res.json(body);
+                // AUDIT FIX (round 5): only cache a REAL model list. An error
+                // body (e.g. upstream 429 {"error":...}) parses as JSON but has
+                // no data array — the old code cached it as an empty list for
+                // 60s, poisoning /v1/models exactly when upstream is degraded.
+                if (Array.isArray(models.data)) {
+                    const allow = allowedModels();
+                    const body = { data: models.data.filter(m => allow.includes(m.id)) };
+                    modelsCache = { data: body, at: Date.now() };
+                    return res.json(body);
+                }
+                // upstream error body — serve stale cache, else the allowlist
+                // (what the gate actually permits), WITHOUT caching the lie
+                if (modelsCache.data) return res.json(modelsCache.data);
+                return res.json({ data: allowedModels() });
             } catch (e) {
                 if (modelsCache.data) return res.json(modelsCache.data); // stale on parse error
                 res.json({ data: [] });
