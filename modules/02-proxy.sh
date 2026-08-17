@@ -30,12 +30,16 @@ deploy_oc_unit() {
     # sentinel: the js must contain the current feature markers — socks-proxy-agent
     # (present since round 1) AND the round-3 env var. Checking only the socks
     # marker would skip rewriting the unit on an already-installed box, silently
-    # missing OC_ALLOW_DIRECT_FALLBACK (round-4 fix).
+    # missing OC_ALLOW_DIRECT_FALLBACK (round-4 fix). The USAGE_ALERT_TOKENS line
+    # must match VALUE too, not just presence — a stale 5M default would survive
+    # forever otherwise (round-6 fix: sentinel now compares the current default).
+    local alert_default="${USAGE_ALERT_TOKENS:-1000000}"
     systemctl_cmd is-active --quiet "$unit_name" 2>/dev/null \
         && [ -f "$unit" ] \
         && grep -qF "socks-proxy-agent" "${BIN_DIR}/oc-free-proxy.js" 2>/dev/null \
         && grep -qF "OC_ALLOW_DIRECT_FALLBACK" "${BIN_DIR}/oc-free-proxy.js" 2>/dev/null \
-        && grep -qF "OC_ALLOW_DIRECT_FALLBACK" "$unit" 2>/dev/null && {
+        && grep -qF "OC_ALLOW_DIRECT_FALLBACK" "$unit" 2>/dev/null \
+        && grep -qF "USAGE_ALERT_TOKENS=${alert_default}" "$unit" 2>/dev/null && {
         log "oc-free-proxy active with correct config"
         return 0
     }
@@ -50,7 +54,7 @@ Wants=network-online.target
 Type=simple
 Environment=HOME=${HOME}
 Environment=NODE_PATH=${HOME}/.opencode-proxy/node_modules
-Environment=USAGE_ALERT_TOKENS=${USAGE_ALERT_TOKENS:-5000000}
+Environment=USAGE_ALERT_TOKENS=${USAGE_ALERT_TOKENS:-1000000}
 Environment=OC_ALLOW_DIRECT_FALLBACK=${OC_ALLOW_DIRECT_FALLBACK:-0}
 ExecStart=/usr/bin/node ${BIN_DIR}/oc-free-proxy.js
 Restart=always
