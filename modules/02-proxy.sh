@@ -74,11 +74,31 @@ proxy_healthy() {
     curl -s --max-time 6 "http://127.0.0.1:${PROXY_PORT}/health" 2>/dev/null | grep -q '"status":"ok"'
 }
 
+# round-6.1: verify the RUNNING process actually picked up the unit env — /health
+# is answered by whatever holds :6446, including a stale process whose restart
+# silently failed or whose env is overridden by a drop-in. alertTokens reflects
+# USAGE_ALERT_TOKENS at startup, so a mismatch = wrong process/env is serving.
+proxy_env_verified() {
+    local want="${USAGE_ALERT_TOKENS:-1000000}"
+    curl -s --max-time 6 "http://127.0.0.1:${PROXY_PORT}/usage" 2>/dev/null \
+        | grep -q "\"alertTokens\":${want}"
+}
+
 module_main() {
     ensure_oc_proxy_js
     deploy_oc_unit
     sleep 2
-    proxy_healthy && log "proxy healthy" || log "proxy NOT healthy yet"
+    if proxy_healthy; then
+        # round-6.1: /health is not enough — a stale process can answer it.
+        # alertTokens verifies the RUNNING env matches the intended default.
+        if proxy_env_verified; then
+            log "proxy healthy, env verified (alertTokens=${USAGE_ALERT_TOKENS:-1000000})"
+        else
+            log "WARN: proxy up but alertTokens MISMATCH — stale process or drop-in override (check .service.d/)"
+        fi
+    else
+        log "proxy NOT healthy yet"
+    fi
 }
 
 if [ "$(basename "$0")" = "02-proxy.sh" ]; then
