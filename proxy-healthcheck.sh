@@ -21,7 +21,10 @@ DEEP_BODY="$STATE_DIR/deep-body.json"
 DEEP_HEADERS="$STATE_DIR/deep-headers.txt"
 
 # root/system unit, or user units: pick the right systemctl wrapper
-if command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then SC="sudo -n systemctl"; else SC="systemctl --user"; fi
+# FIX 2026-08-26: check root FIRST. Old logic did `sudo -n true` which fails
+# when root has no passwordless sudo, so a root-installed healthcheck fell to
+# `systemctl --user` and could never heal the root-system oc-free-proxy unit.
+if [ "$(id -u)" -eq 0 ]; then SC="systemctl"; elif command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then SC="sudo -n systemctl"; else SC="systemctl --user"; fi
 
 now() { date +%s; }
 log() { echo "$(date '+%F %T') $*" >> "$LOG"; }
@@ -75,7 +78,7 @@ fi
 # deep chat — only when the egress gate passed (CF egress present)
 if [ "$eg_ok" = "1" ]; then
     code=$(curl -s --max-time 40 -D "$DEEP_HEADERS" -o "$DEEP_BODY" -w '%{http_code}' -X POST http://127.0.0.1:6446/v1/chat/completions \
-      -H "Content-Type: application/json" -d '{"model":"deepseek-v4-flash-free","messages":[{"role":"user","content":"ping"}],"max_tokens":1}' 2>/dev/null || echo 000)
+      -H "Content-Type: application/json" -d '{"model":"laguna-s-2.1-free","messages":[{"role":"user","content":"ping"}],"max_tokens":1}' 2>/dev/null || echo 000)
     if [ "$code" = "200" ] && grep -q '"choices"' "$DEEP_BODY" 2>/dev/null; then
         exit 0
     fi
@@ -139,7 +142,7 @@ fi
 
 # post-heal verification
 code2=$(curl -s --max-time 40 -D "$DEEP_HEADERS" -o "$DEEP_BODY" -w '%{http_code}' -X POST http://127.0.0.1:6446/v1/chat/completions \
-  -H "Content-Type: application/json" -d '{"model":"deepseek-v4-flash-free","messages":[{"role":"user","content":"ping"}],"max_tokens":1}' 2>/dev/null || echo 000)
+  -H "Content-Type: application/json" -d '{"model":"laguna-s-2.1-free","messages":[{"role":"user","content":"ping"}],"max_tokens":1}' 2>/dev/null || echo 000)
 if [ "$code2" = "200" ] && grep -q '"choices"' "$DEEP_BODY" 2>/dev/null; then
     log "HEAL: verified — chat 200 after heal"
     exit 0
