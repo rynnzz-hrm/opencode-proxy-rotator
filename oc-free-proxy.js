@@ -168,7 +168,10 @@ process.on("unhandledRejection", (e) => {
 
 // Model filtering — anonymous free tier always; paid only when a real key is set
 const FREE_MODELS = [
-    "deepseek-v4-flash-free",
+    // deepseek-v4-flash-free removed 2026-08-26: upstream Console retired it
+    // ("Upstream request failed: Model is unavailable"); advertising a dead
+    // model makes /v1/models lie and the gate forwards 400s. Same class of
+    // death as north-mini-code-free (2026-08-07). Don't re-add unless probed.
     "ling-3.0-flash-free",
     "mimo-v2.5-free",
     "nemotron-3-ultra-free",
