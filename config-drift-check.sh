@@ -112,6 +112,10 @@ if [ "$DUPLICATE_COUNT" -gt 1 ]; then
 fi
 
 # Check 6: Is repo version newer than live? (compare timestamps)
+# First, pull latest from GitHub to ensure repo is up to date
+if [ -d "$REPO_DIR/.git" ]; then
+    cd "$REPO_DIR" && sudo -u rynn git pull --quiet 2>/dev/null || true
+fi
 if [ -f "$REPO_DIR/oc-free-proxy.js" ]; then
     LIVE_MTIME=$(stat -c %Y "$LIVE_FILE" 2>/dev/null || echo "0")
     REPO_MTIME=$(stat -c %Y "$REPO_DIR/oc-free-proxy.js" 2>/dev/null || echo "0")
