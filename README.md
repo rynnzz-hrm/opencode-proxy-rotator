@@ -39,6 +39,10 @@ The proxy requires npm deps: `express http-proxy-middleware socks-proxy-agent ex
 
 - **Free tier is anonymous** — no API key. The proxy strips client Authorization
   headers; a dummy key upstream = 401. `OC_UPSTREAM_AUTH` unlocks paid models only.
+- **Hermes Agent headers** — the proxy sends special headers (`HTTP-Referer`,
+  `X-Title`, `User-Agent`) that opencode.ai recognizes for free-tier special
+  treatment. Without these headers, some models (like `ling-3.0-flash-fin-free`)
+  fail with "Endpoint unavailable".
 - **Model gate** — `/v1/chat/completions` with a model outside the allowlist gets
   a clean 400 (no upstream round-trip).
 - **Rate caps** — 45/min, 1800/hr, 2400/day per client (all local = total
@@ -49,6 +53,58 @@ The proxy requires npm deps: `express http-proxy-middleware socks-proxy-agent ex
   (+ history on IP change). Set `USAGE_ALERT_TOKENS` (e.g. 5000000) to log a
   one-shot `USAGE ALERT` warning when a window crosses it.
 - **/v1/models** — lists only allowlisted models (auto-sync can extend the list).
+
+## Response monitoring & auto-rotate (Phase 2)
+
+The proxy monitors every chat response for errors:
+
+| Error Type | Action | Logged |
+|------------|--------|--------|
+| `FreeUsageLimitError` | Trigger WARP rotation | `proxy.jsonl` + `rotation.jsonl` |
+| `Endpoint unavailable` | Log only | `proxy.jsonl` |
+| `Internal server error` | Log only | `proxy.jsonl` |
+
+Per-model health is tracked in memory and exposed via `/health/models`:
+
+```json
+{
+  "models": {
+    "nemotron-3.5-lightning-free": {
+      "status": "healthy",
+      "failures": 0,
+      "lastError": null,
+      "lastSuccess": "2026-09-01T05:03:36.519Z"
+    }
+  },
+  "egressMode": "warp",
+  "ip": "104.28.204.164"
+}
+```
+
+## Post-rotate verification (Phase 3)
+
+After every WARP rotation, `post-rotate-verify.sh` confirms:
+1. Registration ID changed (rotation actually executed)
+2. IP changed (Cloudflare assigned new IP)
+3. Proxy is still healthy
+
+Results logged to `/var/log/oc-proxy/verify.jsonl`.
+
+## Config drift checker (Phase 3)
+
+`config-drift-check.sh` runs every 5 minutes and checks:
+1. Does `oc-free-proxy.js` exist?
+2. Does it have Hermes headers?
+3. Is it syntactically valid? (`node --check`)
+4. Does `/health` respond?
+5. Are there duplicate proxy processes?
+6. Is the repo version newer than live?
+
+If any check fails, it automatically:
+- Backs up the current file
+- Copies from the repo
+- Restarts the proxy
+- Logs the event to `/var/log/oc-proxy/drift.jsonl`
 
 ## Rotation semantics
 
@@ -69,9 +125,23 @@ cooldown so a quota-looping IP isn't hammered. Failures append to
 ## Model sync (merge-only)
 
 `sync-models.sh` probes upstream `*-free` models (through the same WARP socks)
-and MERGES the passing set into `free-models.json` — it can ADD, never REMOVE.
-This is deliberate: probes fail during IP rate-limits, and a shrunk allowlist
-400s clients ("model not allowed") exactly when the proxy is already broken.
+with Hermes Agent headers and MERGES the passing set into `free-models.json` —
+it can ADD, never REMOVE. This is deliberate: probes fail during IP rate-limits,
+and a shrunk allowlist 400s clients ("model not allowed") exactly when the proxy
+is already broken.
+
+## Structured logging
+
+All events are logged to `/var/log/oc-proxy/`:
+
+| File | Contents |
+|------|----------|
+| `proxy.jsonl` | Every error: model, status, error type, action taken |
+| `rotation.jsonl` | WARP rotation events: reason, old/new IP |
+| `verify.jsonl` | Post-rotate verification results |
+| `drift.jsonl` | Config drift events: what was wrong, what was done |
+
+Log rotation: daily, keep 5 backups, max 10MB per file.
 
 ## Operator notes
 
@@ -92,3 +162,42 @@ This is deliberate: probes fail during IP rate-limits, and a shrunk allowlist
 - Same-IP rotation repeats are normal — check the registration ID, not the IP.
 - `ALL_PROXY` in the profile is vestigial for node (node ignores it); keep it
   for curl/wget-based tooling.
+- **Single proxy process.** Only one `oc-free-proxy.js` should run (root via
+  systemd). The drift checker detects and kills duplicate processes.
+
+## Debugging
+
+Check proxy status:
+```bash
+curl http://localhost:6446/health          # basic health
+curl http://localhost:6446/health/models   # per-model status
+curl http://localhost:6446/usage           # usage stats
+```
+
+Check logs:
+```bash
+cat /var/log/oc-proxy/proxy.jsonl         # error log
+cat /var/log/oc-proxy/rotation.jsonl      # rotation events
+cat /var/log/oc-proxy/verify.jsonl        # rotation verification
+cat /var/log/oc-proxy/drift.jsonl         # config drift events
+```
+
+Check timers:
+```bash
+systemctl list-timers | grep -E "warp|proxy|health|sync|drift"
+```
+
+Force rotation:
+```bash
+/usr/local/bin/warp-rotate
+```
+
+Force sync:
+```bash
+/usr/local/bin/sync-models.sh
+```
+
+Force drift check:
+```bash
+/usr/local/bin/config-drift-check.sh
+```
