@@ -102,7 +102,16 @@ if ! echo "$HEALTH" | grep -q '"status":"ok"'; then
     exit 0
 fi
 
-# Check 5: Is repo version newer than live? (compare timestamps)
+# Check 5: Are there duplicate processes? (root vs user service)
+DUPLICATE_COUNT=$(ps aux | grep "oc-free-proxy.js" | grep -v grep | wc -l)
+if [ "$DUPLICATE_COUNT" -gt 1 ]; then
+    log "WARN: $DUPLICATE_COUNT proxy processes detected — killing user-owned ones"
+    # Kill any process NOT owned by root
+    ps aux | grep "oc-free-proxy.js" | grep -v grep | grep -v root | awk '{print $2}' | xargs kill 2>/dev/null || true
+    log_jsonl "{\"ts\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"status\":\"fixed\",\"reason\":\"duplicate_processes\",\"action\":\"killed_user_processes\"}"
+fi
+
+# Check 6: Is repo version newer than live? (compare timestamps)
 if [ -f "$REPO_DIR/oc-free-proxy.js" ]; then
     LIVE_MTIME=$(stat -c %Y "$LIVE_FILE" 2>/dev/null || echo "0")
     REPO_MTIME=$(stat -c %Y "$REPO_DIR/oc-free-proxy.js" 2>/dev/null || echo "0")
