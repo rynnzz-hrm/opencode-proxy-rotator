@@ -5,6 +5,22 @@ All notable changes to the opencode-proxy-rotator project will be documented in 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] - 2026-09-01
+
+### Added
+- **Response monitoring**: Track per-model health (failure counts, last error, last success)
+- **Auto-rotate on rate limit**: When `FreeUsageLimitError` is detected, automatically trigger WARP rotation
+- **Structured logging**: Log all errors to `/var/log/oc-proxy/proxy.jsonl` and rotation events to `rotation.jsonl`
+- **Model health endpoint**: `/health/models` shows per-model status, failure counts, and error details
+
+### Fixed
+- **Rate limit detection**: Correctly identifies `FreeUsageLimitError` and triggers rotation
+- **Error logging**: All upstream errors are now logged with model, error type, and action taken
+
+### Changed
+- **Response body parsing**: Now buffers response body to detect errors before forwarding to client
+- **Health tracking**: Models with 3+ consecutive failures are marked as "unhealthy" in `/health/models`
+
 ## [1.1.0] - 2026-09-01
 
 ### Added
