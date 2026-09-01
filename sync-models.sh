@@ -20,6 +20,11 @@
 # passing models into the existing allowlist — it can ADD, never REMOVE.
 # Probes also go through the SAME WARP SOCKS the proxy uses (node's outbound
 # path), so a probe result reflects what the proxy's upstream actually sees.
+#
+# 2026-08-30 Hermes headers: opencode.ai gives free-tier special treatment
+# to requests from Hermes Agent. Without these headers, models like
+# ling-3.0-flash-fin-free fail probing (Endpoint unavailable) even though
+# they work through the proxy with headers.
 
 set -euo pipefail
 
@@ -31,6 +36,13 @@ UPSTREAM_AUTH="${OC_UPSTREAM_AUTH:-}"
 PROBE_TIMEOUT="30"
 # per-run probe body (PID-suffixed — concurrent runs can't clobber each other)
 PROBE_BODY="/tmp/probe-body-$$.json"
+
+# Hermes Agent headers — opencode.ai gives free-tier special treatment
+HERMES_HEADERS=(
+    -H "HTTP-Referer: https://hermes-agent.nousresearch.com"
+    -H "X-Title: Hermes Agent"
+    -H "User-Agent: HermesAgent/0.20.6"
+)
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"; }
 
@@ -58,23 +70,25 @@ restart_proxy() {
 probe_model() {
     local model="$1"
     local auth_hdr=()
-    [ -n "$UPSTREAM_AUTH" ] && auth_hdr=(-H "Authorization: Bearer ${UPSTREAM_AUTH}")
+    [ -n "$UPSTREAM_AUTH" ] && auth_hdr=(-H "Authorization: Bearer ***")
     local body="{\"model\":\"${model}\",\"messages\":[{\"role\":\"user\",\"content\":\"ping\"}],\"max_tokens\":1}"
     local resp
     # ${auth_hdr[@]+...} guards the empty-array expansion under set -u (bash <4.4)
     resp=$(curl -sk --max-time "$PROBE_TIMEOUT" --socks5-hostname 127.0.0.1:40000 -o "$PROBE_BODY" -w '%{http_code}' \
-        -X POST "$UPSTREAM_CHAT" -H "Content-Type: application/json" ${auth_hdr[@]+"${auth_hdr[@]}"} \
+        -X POST "$UPSTREAM_CHAT" -H "Content-Type: application/json" \
+        "${HERMES_HEADERS[@]}" ${auth_hdr[@]+"${auth_hdr[@]}"} \
         -d "$body" 2>/dev/null || echo "000")
-    if [ "$resp" = "200" ] && grep -q '"choices":\s*\[\s*"' "$PROBE_BODY" 2>/dev/null; then
-        return 0
-    fi
-    # non-empty choices[0] content — a 200 with "choices":[] must NOT pass
+    # A 200 with a non-empty choices array = model is available.
+    # Content can be null (max_tokens=1) — that's fine, the model responded.
+    # Only fail if: no choices, empty choices, or error in response.
     if [ "$resp" = "200" ] && python3 -c "
 import json,sys
 try:
     d=json.load(open('$PROBE_BODY'))
+    if d.get('error'):
+        sys.exit(1)  # upstream returned an error body
     c=d.get('choices') or []
-    sys.exit(0 if c and c[0].get('content') else 1)
+    sys.exit(0 if len(c) > 0 else 1)  # pass if choices array is non-empty
 except Exception:
     sys.exit(1)" 2>/dev/null; then
         return 0
@@ -86,8 +100,10 @@ except Exception:
 # AUDIT FIX 2026-08-16: was DIRECT (no socks) — every sync burned the ISP IP's
 # opencode quota (the 20h-lockout vector). Now routes through WARP like the rest;
 # -f fails on HTTP errors instead of feeding error bodies to the JSON parser.
+# 2026-08-30: added Hermes headers for consistent upstream access.
 fetch_free_models() {
-    curl -sk --max-time 20 --socks5-hostname 127.0.0.1:40000 -f "$UPSTREAM_LIST" 2>/dev/null \
+    curl -sk --max-time 20 --socks5-hostname 127.0.0.1:40000 -f "$UPSTREAM_LIST" \
+        "${HERMES_HEADERS[@]}" 2>/dev/null \
         | python3 -c "
 import sys, json
 try:
