@@ -17,6 +17,14 @@
 
 set -euo pipefail
 
+# Prevent concurrent runs (race condition with rotation)
+LOCK="/run/config-drift-check.lock"
+exec 9>"$LOCK"
+if ! flock -n 9; then
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] SKIP: another drift check is already running"
+    exit 0
+fi
+
 LOG_DIR="/var/log/oc-proxy"
 mkdir -p "$LOG_DIR"
 DRIFT_LOG="$LOG_DIR/drift.jsonl"
@@ -24,12 +32,23 @@ DRIFT_LOG="$LOG_DIR/drift.jsonl"
 REPO_DIR="/home/rynn/opencode-proxy-rotator"
 LIVE_FILE="/usr/local/bin/oc-free-proxy.js"
 BACKUP_DIR="/usr/local/bin/oc-free-proxy-backups"
+MAX_BACKUPS=10  # Keep last 10 backups
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"; }
 log_jsonl() { echo "$1" >> "$DRIFT_LOG"; }
 
 # Ensure backup directory exists
 mkdir -p "$BACKUP_DIR"
+
+# Cleanup old backups (keep last MAX_BACKUPS)
+cleanup_backups() {
+    local count
+    count=$(ls -1 "$BACKUP_DIR"/oc-free-proxy.js.bak.* 2>/dev/null | wc -l)
+    if [ "$count" -gt "$MAX_BACKUPS" ]; then
+        ls -1t "$BACKUP_DIR"/oc-free-proxy.js.bak.* | tail -n +$((MAX_BACKUPS + 1)) | xargs rm -f
+        log "Cleaned up old backups (kept $MAX_BACKUPS)"
+    fi
+}
 
 # Check 1: Does the file exist?
 if [ ! -f "$LIVE_FILE" ]; then
@@ -100,5 +119,6 @@ if [ -f "$REPO_DIR/oc-free-proxy.js" ]; then
     fi
 fi
 
-# All checks passed
+# All checks passed — cleanup old backups
+cleanup_backups
 log "OK: All checks passed"
