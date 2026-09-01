@@ -5,6 +5,19 @@ All notable changes to the opencode-proxy-rotator project will be documented in 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] - 2026-09-01
+
+### Added
+- **Post-rotate verification**: `post-rotate-verify.sh` verifies WARP rotation actually changed the IP after auto-rotate. Checks registration ID change, IP change, and proxy health.
+- **Config drift checker**: `config-drift-check.sh` runs every 5 minutes to verify code is working. Checks: file exists, has Hermes headers, syntax valid, /health responds, repo version not newer. Auto-redeploys from repo if broken.
+- **Drift logging**: All drift events logged to `/var/log/oc-proxy/drift.jsonl`
+- **Verification logging**: All rotation verification events logged to `verify.jsonl`
+
+### Systemd Units
+- `config-drift-check.timer` — runs every 5 minutes
+- `config-drift-check.service` — one-shot drift check
+- `post-rotate-verify.service` — called after WARP rotation
+
 ## [1.2.0] - 2026-09-01
 
 ### Added

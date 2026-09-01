@@ -1,0 +1,5 @@
+[Unit]
+Description=Config drift check (5-min interval, auto-redeploy)
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/config-drift-check.sh

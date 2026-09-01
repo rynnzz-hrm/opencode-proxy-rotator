@@ -1,0 +1,5 @@
+[Unit]
+Description=Post-rotate verification (called after WARP rotation)
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/post-rotate-verify.sh
