@@ -13,8 +13,12 @@
 #  - log registration ID before/after as ground truth (ID flip = rotation ran).
 #  - poll warp-cli status until Connected instead of a blind sleep.
 #  - flock: the timer and the healthcheck's heal ladder can trigger concurrently.
-#  - traffic guard: ANY established conn on :6446 = skip (old queue-depth check
-#    never fired — idle-but-alive streams have ~0 queue depth; 0 SKIPs in 102 runs).
+#  - traffic guard: ONLY skip for ACTIVE chat requests (not long-lived monitoring
+#    connections like healchaind). This allows rotation even when monitoring
+#    services are connected.
+#
+# 2026-09-01 Phase 3: Modified traffic guard to allow rotation with monitoring
+# connections. Only skip if there are ACTIVE (short-lived) chat connections.
 
 set -euo pipefail
 
@@ -29,14 +33,26 @@ log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"; }
 
 log "=== WARP IP rotation ==="
 
-# Real-traffic guard: skip rotation if there is ANY established conn through :6446
-# (long-running AI trading streams get killed mid-rotation otherwise).
-if ss -tn state established 2>/dev/null | grep -qE ":6446([^0-9]|$)"; then
-    active=$(ss -tn state established 2>/dev/null | grep -E ":6446([^0-9]|$)" | awk '{print $4}' | tr '\n' ' ')
-    log "SKIP rotation: live traffic on :6446 ($active)"
-    exit 0
+# Smart traffic guard: only skip rotation for ACTIVE chat requests
+# (connections with data flowing), not long-lived monitoring connections
+# (like healchaind which holds a persistent connection).
+#
+# How it works:
+# 1. Get all connections on :6446
+# 2. Check if any have data in the queue (Recv-Q > 0) = ACTIVE
+# 3. If only idle connections (Recv-Q = 0) = safe to rotate
+CONNS=$(ss -tn state established 2>/dev/null | grep -E ":6446([^0-9]|$)" || true)
+if [ -n "$CONNS" ]; then
+    # Check for ACTIVE connections (data in queue)
+    ACTIVE=$(echo "$CONNS" | awk '$2 > 0 {print $0}')
+    if [ -n "$ACTIVE" ]; then
+        log "SKIP rotation: ACTIVE traffic on :6446 (data flowing)"
+        exit 0
+    fi
+    # Only idle/monitoring connections - safe to rotate
+    IDLE_COUNT=$(echo "$CONNS" | wc -l)
+    log "Found $IDLE_COUNT idle connections on :6446 (monitoring only) - proceeding with rotation"
 fi
-log "No live traffic on :6446, proceeding"
 
 # Ground truth: registration ID (flips on every successful re-registration)
 OLD_REG=$(warp-cli --accept-tos registration show 2>/dev/null | grep -oP 'ID: \K[0-9a-f-]+' | head -1 || echo "?")
